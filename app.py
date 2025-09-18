@@ -1,14 +1,16 @@
-# app.py — WavePilot v0.3 “Pro”
-# Free features: Trends + Leads + Outreach + Weekly Report
-# Pro (optional): LangChain/LangGraph orchestrator, CrewAI lead dossiers, AutoGPT webhooks
+# app.py — WavePilot (single-file)
+# Free: Trends + Leads + Outreach + Weekly Report
+# Pro toggles are safe (UI-only if deps not installed)
+# Includes "Warm up the AI" button for Render/Cloud cold starts
 
 import os, io, json, textwrap, datetime as dt
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import streamlit as st
 import pandas as pd
+import requests
 
-# --- Optional libs (we degrade gracefully) ---
+# ---------- Optional libs (graceful fallbacks) ----------
 DOCX_OK = True
 try:
     from docx import Document
@@ -27,25 +29,7 @@ try:
 except Exception:
     OpenAI = None
 
-# Local modules
-from tools.trends import gather_trends
-from tools.places import search_places_optional
-
-# Pro orchestrator (LangChain + LangGraph)
-try:
-    from lc.orchestrator import lc_lead_research, lc_playbook
-    LC_OK = True
-except Exception:
-    LC_OK = False
-
-# CrewAI growth crew (optional)
-try:
-    from crew.run import run_growth_crew
-    CREW_OK = True
-except Exception:
-    CREW_OK = False
-
-# ----------------- env & helpers -----------------
+# ------------------- ENV / LLM helpers -------------------
 def _env(k: str, d: str = "") -> str:
     return os.getenv(k, d)
 
@@ -56,56 +40,217 @@ def llm_ok() -> bool:
     return client is not None
 
 def llm(prompt: str, system: str = "You are a helpful marketer.", temp: float = 0.4) -> str:
-    if not llm_ok(): return ""
+    if not llm_ok():
+        return ""
     try:
         r = client.chat.completions.create(
-            model="gpt-4o-mini", temperature=temp,
-            messages=[{"role":"system","content":system},{"role":"user","content":prompt}]
+            model="gpt-4o-mini",
+            temperature=temp,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt},
+            ],
         )
         return (r.choices[0].message.content or "").strip()
     except Exception as e:
         return f"(AI unavailable: {e})"
 
 def build_docx_bytes(title: str, body_md: str) -> bytes:
-    if not DOCX_OK: return b""
-    doc = Document(); doc.add_heading(title, level=1)
+    if not DOCX_OK:
+        return b""
+    doc = Document()
+    doc.add_heading(title, level=1)
     for para in body_md.split("\n\n"):
-        if para.strip(): doc.add_paragraph(para.strip())
-    buf = io.BytesIO(); doc.save(buf); buf.seek(0); return buf.read()
+        if para.strip():
+            doc.add_paragraph(para.strip())
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    return buf.read()
 
 def inject_css():
-    st.markdown("""
-    <style>
-      :root { --card-bg:#0e1117; --card-border:#2b2f36; }
-      .kpi-card {border:1px solid var(--card-border); border-radius:14px; padding:16px 18px; background:var(--card-bg);}
-      .kpi-label {font-size:.80rem; opacity:.85; letter-spacing:.2px}
-      .kpi-value {font-weight:800; font-size:1.25rem; margin-top:4px}
-      h2, h3, h4 { letter-spacing:.2px }
-      .stDataFrame { border:1px solid var(--card-border); border-radius:12px; }
-      .stAlert { border-radius:12px; }
-      .stButton>button { border-radius:10px; padding:.5rem .9rem; font-weight:600 }
-    </style>
-    """, unsafe_allow_html=True)
+    st.markdown(
+        """
+        <style>
+          :root { --card-bg:#0e1117; --card-border:#2b2f36; }
+          .kpi-card {border:1px solid var(--card-border); border-radius:14px; padding:16px 18px; background:var(--card-bg);}
+          .kpi-label {font-size:.80rem; opacity:.85; letter-spacing:.2px}
+          .kpi-value {font-weight:800; font-size:1.25rem; margin-top:4px}
+          .stDataFrame { border:1px solid var(--card-border); border-radius:12px; }
+          .stAlert { border-radius:12px; }
+          .stButton>button { border-radius:10px; padding:.5rem .9rem; font-weight:600 }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 def kpi(label: str, value: str):
-    st.markdown(f"""
-    <div class="kpi-card">
-      <div class="kpi-label">{label}</div>
-      <div class="kpi-value">{value}</div>
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown(
+        f"""
+        <div class="kpi-card">
+          <div class="kpi-label">{label}</div>
+          <div class="kpi-value">{value}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-# Back-compat wrapper (if your trends.gather_trends lacks reddit_mode)
-def gather_trends_safe(**kwargs) -> Dict:
+# ------------- Warm-up button (Render/Cloud) -------------
+def warm_up_render(url: str, timeout: int = 10) -> str:
+    if not url:
+        return "No wake URL set. Add RENDER_WAKE_URL to your environment."
     try:
-        return gather_trends(**kwargs)
-    except TypeError:
-        kwargs.pop("reddit_mode", None)
-        return gather_trends(**kwargs)
+        r = requests.head(url, timeout=timeout, allow_redirects=True)
+        if 200 <= r.status_code < 400:
+            return f"Warmed! ({r.status_code})"
+        r = requests.get(url, timeout=timeout)
+        return f"Warmed! ({r.status_code})" if 200 <= r.status_code < 400 else f"Service responded: {r.status_code}"
+    except Exception as e:
+        return f"Warm-up failed: {e}"
 
-# ------------- Streamlit page/state -------------
+# --------------------- Trends (inline) --------------------
+# (Uses pytrends + praw if installed; otherwise returns a friendly error)
+def google_trends_rising(keywords: List[str], geo="US", timeframe="now 7-d") -> Dict:
+    try:
+        from pytrends.request import TrendReq
+    except Exception:
+        return {"source":"google_trends","error":"pytrends not installed","rising":[],"iot":{}}
+    pytrends = TrendReq(hl="en-US", tz=360)
+    rising_all, iot_map = [], {}
+    for kw in keywords[:6]:
+        try:
+            pytrends.build_payload([kw], timeframe=timeframe, geo=geo)
+            iot = pytrends.interest_over_time()
+            if not iot.empty:
+                ser = iot[kw].reset_index().rename(columns={kw:"interest","date":"ts"})
+                ser["keyword"] = kw
+                iot_map[kw] = ser.to_dict(orient="records")
+            rq = pytrends.related_queries()
+            if kw in rq and rq[kw].get("rising") is not None:
+                rising_df = rq[kw]["rising"].head(10)
+                for _, row in rising_df.iterrows():
+                    rising_all.append({
+                        "keyword": kw,
+                        "query": row["query"],
+                        "value": int(row.get("value",0)),
+                        "link": f"https://www.google.com/search?q={row['query'].replace(' ','+')}",
+                    })
+        except Exception as e:
+            rising_all.append({"keyword":kw,"query":None,"value":0,"error":str(e)})
+    return {"source":"google_trends","rising":rising_all,"iot":iot_map}
+
+def reddit_hot_or_top(subreddits: List[str], mode: str = "hot", limit: int = 15) -> Dict:
+    try:
+        import praw
+    except Exception:
+        return {"source":"reddit","error":"praw not installed","posts":[]}
+    cid=_env("REDDIT_CLIENT_ID"); csec=_env("REDDIT_CLIENT_SECRET"); ua=_env("REDDIT_USER_AGENT","wavepilot/1.0 by <user>")
+    if not (cid and csec and ua):
+        return {"source":"reddit","error":"Missing Reddit API keys (CLIENT_ID/SECRET/USER_AGENT).","posts":[]}
+    try:
+        reddit = praw.Reddit(client_id=cid, client_secret=csec, user_agent=ua, check_for_async=False)
+        reddit.read_only = True
+        posts=[]
+        for sub in (subreddits or [])[:6]:
+            try:
+                sr = reddit.subreddit(sub)
+                it = sr.top(limit=limit, time_filter="week") if mode=="top" else sr.hot(limit=limit)
+                for p in it:
+                    posts.append({"subreddit":sub,"title":p.title,"score":int(p.score),
+                                  "url":f"https://www.reddit.com{p.permalink}","created_utc":int(p.created_utc)})
+            except Exception as e:
+                posts.append({"subreddit":sub,"title":None,"score":0,"error":str(e)})
+        posts = sorted(posts, key=lambda x: x.get("score",0), reverse=True)
+        return {"source":"reddit","posts":posts}
+    except Exception as e:
+        return {"source":"reddit","error":str(e),"posts":[]}
+
+def youtube_search(api_key: str, query: str, max_results: int = 10) -> Dict:
+    if not api_key:
+        return {"source":"youtube","items":[],"error":"missing key"}
+    try:
+        url="https://www.googleapis.com/youtube/v3/search"
+        params={"part":"snippet","q":query,"type":"video","order":"date","maxResults":max_results,"key":api_key}
+        r=requests.get(url, params=params, timeout=20); r.raise_for_status()
+        items=[]
+        for it in r.json().get("items", []):
+            sn=it.get("snippet",{})
+            items.append({"title":sn.get("title"),"channel":sn.get("channelTitle"),
+                          "publishedAt":sn.get("publishedAt"),
+                          "url":f"https://www.youtube.com/watch?v={it['id'].get('videoId')}"})
+        return {"source":"youtube","items":items}
+    except Exception as e:
+        return {"source":"youtube","items":[],"error":str(e)}
+
+def gather_trends(niche_keywords: List[str], city="", state="", subs: Optional[List[str]]=None,
+                  geo="US", timeframe="now 7-d", youtube_api_key: Optional[str]=None,
+                  reddit_mode: str="hot") -> Dict:
+    subs = subs or ["SmallBusiness","Marketing"]
+    kw = [k for k in niche_keywords if k][:6]
+    if city and state: kw.append(f"{city} {state}")
+    gt = google_trends_rising(kw, geo=geo, timeframe=timeframe)
+    rd = reddit_hot_or_top(subs, mode=reddit_mode)
+    yt = youtube_search(youtube_api_key or _env("YOUTUBE_API_KEY",""), " | ".join(kw) or "local business", 10)
+    return {"generated_at": dt.datetime.utcnow().isoformat(),
+            "inputs":{"keywords":kw,"geo":geo,"timeframe":timeframe,"city":city,"state":state,"subs":subs},
+            "google_trends":gt,"reddit":rd,"youtube":yt}
+
+# ------------------ Google Places (inline) ----------------
+def search_places_optional(query: str, city: str, state: str, limit: int = 12, api_key: str = "") -> Optional[pd.DataFrame]:
+    """Google Places (New) Text Search → DataFrame with Name, Rating, Reviews, Phone, Website, Address, Lat, Lng, MapsUrl."""
+    if not api_key:
+        return None
+    text_url = "https://places.googleapis.com/v1/places:searchText"
+    loc = ", ".join([x for x in [city.strip(), state.strip()] if x])
+    q = f"{query} in {loc}" if loc else query
+    headers = {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": api_key,
+        "X-Goog-FieldMask": (
+            "places.id,places.displayName,places.formattedAddress,places.location,"
+            "places.rating,places.userRatingCount,places.nationalPhoneNumber,"
+            "places.websiteUri,places.googleMapsUri"
+        ),
+    }
+    body = {"textQuery": q, "maxResultCount": limit}
+    r = requests.post(text_url, headers=headers, json=body, timeout=20)
+    r.raise_for_status()
+    places = r.json().get("places", []) or []
+    rows = []
+    for p in places[:limit]:
+        name = (p.get("displayName") or {}).get("text") or p.get("name", "").split("/")[-1]
+        locd = p.get("location") or {}
+        rows.append({
+            "Name": name,
+            "Rating": float(p.get("rating", 0) or 0),
+            "Reviews": int(p.get("userRatingCount", 0) or 0),
+            "Phone": p.get("nationalPhoneNumber", ""),
+            "Website": p.get("websiteUri", ""),
+            "Address": p.get("formattedAddress", ""),
+            "Lat": locd.get("latitude"),
+            "Lng": locd.get("longitude"),
+            "MapsUrl": p.get("googleMapsUri", ""),
+        })
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df["__quality"] = df["Rating"].fillna(0) * (1 + (df["Reviews"].fillna(0) / 1000))
+        df = df.sort_values("__quality", ascending=False).drop(columns="__quality")
+    return df
+
+# ----------------- Streamlit app setup -------------------
 st.set_page_config(page_title="WavePilot — AI Growth Team", page_icon="🌊", layout="wide")
 inject_css()
+
+# Warm-up button in sidebar
+wake_url = os.getenv("RENDER_WAKE_URL", "")
+if st.sidebar.button("🔥 Warm up the AI"):
+    msg = warm_up_render(wake_url)
+    (st.sidebar.success if msg.startswith("Warmed") else st.sidebar.warning)(msg)
+
+# “Pro” toggles (safe if libs missing)
+pro_enabled = st.sidebar.toggle("Enable Pro Orchestrator (LangChain/LangGraph)", value=False)
+crew_enabled = st.sidebar.toggle("Enable Growth Crew (CrewAI)", value=False)
+autogpt_url = st.sidebar.text_input("AutoGPT Webhook URL (optional)", _env("AUTOGPT_URL",""))
 
 st.session_state.setdefault("trend_data_cache", None)
 st.session_state.setdefault("lead_data_cache", None)
@@ -113,15 +258,7 @@ st.session_state.setdefault("reddit_mode", "hot")
 st.session_state.setdefault("out_persona", "Local Professional")
 
 st.title("🌊 WavePilot — AI Growth Team for Local Businesses")
-st.caption("Free trend intel (Google Trends + Reddit), actionable local leads (Google Places), AI outreach, and optional Pro automations.")
-
-pro_enabled = st.sidebar.toggle("Enable Pro Orchestrator (LangChain/LangGraph)", value=False)
-if pro_enabled and not LC_OK:
-    st.sidebar.warning("LangChain/LangGraph not installed yet. Install requirements and redeploy.")
-crew_enabled = st.sidebar.toggle("Enable Growth Crew (CrewAI)", value=False)
-if crew_enabled and not CREW_OK:
-    st.sidebar.warning("CrewAI not installed. Install requirements and redeploy.")
-autogpt_url = st.sidebar.text_input("AutoGPT Webhook URL (optional)", _env("AUTOGPT_URL",""))
+st.caption("Trends → Leads → Outreach. Optional automations available, but not required.")
 
 tab1, tab2, tab3, tab4 = st.tabs(["Trend Rider", "Lead Finder", "Outreach Factory", "Weekly Report"])
 
@@ -130,10 +267,8 @@ with tab1:
     st.subheader("Trend Rider — ride what's hot (free data)")
     with st.expander("How this helps", expanded=False):
         st.write("Spot rising topics and hot discussions in your niche & city so your content rides current demand.")
-
     show_debug = st.toggle("Show debug JSON (advanced)", value=False, key="trend_debug")
-    st.selectbox("Reddit ranking", ["hot","top"], index=0, key="reddit_mode",
-                 help="If you see 401, double-check Reddit keys & USER_AGENT in secrets.")
+    st.selectbox("Reddit ranking", ["hot","top"], index=0, key="reddit_mode")
 
     with st.form("trend_form"):
         niche = st.text_input("Niche keywords (comma-separated)",
@@ -149,10 +284,10 @@ with tab1:
     if submitted:
         keywords = [s.strip() for s in niche.split(",") if s.strip()]
         sub_list = [s.strip() for s in subs.split(",") if s.strip()]
-        data = gather_trends_safe(
+        data = gather_trends(
             niche_keywords=keywords, city=city, state=state, subs=sub_list,
             timeframe=timeframe, youtube_api_key=_env("YOUTUBE_API_KEY",""),
-            reddit_mode=st.session_state.reddit_mode,  # ignored by older trends.py
+            reddit_mode=st.session_state.reddit_mode
         )
         st.session_state.trend_data_cache = data
 
@@ -200,7 +335,7 @@ with tab1:
         }
         summary = llm(
             system="You are a concise SMB strategist.",
-            prompt=(f"Summarize in ~5 bullets what is trending for {city}, {state} in niche {niche}. "
+            prompt=(f"Summarize ~5 bullets of what's trending for {city}, {state} in niche {niche}. "
                     f"Then propose 3 ride-the-wave post ideas. Data:\n{json.dumps(sample)}")
         ) or "Add OPENAI_API_KEY to enable AI-written summaries."
         st.info(summary)
@@ -213,7 +348,6 @@ with tab2:
             "- We surface **feeder businesses** that meet your future customers first.\n"
             "- You get **phone, website, and directions** to start a partnership.\n"
             "- We compute an **Actionability Score** and explain **why** each lead is hot.\n"
-            "- **Pro Orchestrator** can enrich & score leads with LangChain (optional)."
         )
 
     with st.form("lead_form"):
@@ -246,7 +380,6 @@ with tab2:
     elif df is False or (isinstance(df, pd.DataFrame) and df.empty):
         st.warning("No results (check your GOOGLE_PLACES_API_KEY or try a nearby city/another query).")
     else:
-        # Local scoring
         scored = df.copy()
         scored["Score"] = 0
         scored["Why"] = ""
@@ -254,16 +387,6 @@ with tab2:
             s, rs = actionability_score(row, cat)
             scored.at[i, "Score"] = int(s)
             scored.at[i, "Why"] = " · ".join(rs)
-
-        # Pro enrichment (LangChain/LangGraph)
-        if pro_enabled and LC_OK and st.toggle("Use Pro Orchestrator (enrich with LangChain)", value=False, key="lc_enrich"):
-            try:
-                enriched = lc_lead_research(scored, city2, state2)
-                if isinstance(enriched, pd.DataFrame) and not enriched.empty:
-                    scored = enriched
-                    st.success("Pro enrichment complete (LangChain).")
-            except Exception as e:
-                st.warning(f"Pro enrichment failed: {e}")
 
         c1, c2, c3 = st.columns(3)
         with c1: kpi("Shown", str(len(scored)))
@@ -294,27 +417,17 @@ with tab2:
         st.download_button("⬇️ Export CSV", scored.to_csv(index=False).encode("utf-8"),
                            "leads.csv", "text/csv")
 
-        # CrewAI dossiers
-        if crew_enabled and CREW_OK and st.toggle("Draft Growth Crew dossier for selected lead", value=False, key="crew_dossier"):
-            pick = st.selectbox("Choose a lead", scored["Name"].tolist(), key="crew_pick")
-            lead = scored[scored["Name"] == pick].iloc[0].to_dict()
-            try:
-                dossier = run_growth_crew(lead, persona=st.session_state.get("out_persona","Local Professional"))
-                st.markdown("##### Dossier")
-                st.markdown(dossier)
-            except Exception as e:
-                st.warning(f"CrewAI failed: {e}")
-
         # One-click outreach (AI-polished)
         st.markdown("#### One-click outreach")
         pick2 = st.selectbox("Choose a lead", scored["Name"].tolist(), key="lead_pick")
         lead2 = scored[scored["Name"] == pick2].iloc[0].to_dict()
+
         colA, colB = st.columns(2)
         with colA:
             if st.button("Draft email", use_container_width=True, key="btn_email"):
                 body = (llm(
                     system="You write friendly B2B outreach for local partnerships.",
-                    prompt=(f"Draft a short email from a {st.session_state.out_persona} "
+                    prompt=(f"Draft a short email from a {st.session_state.get('out_persona','Local Professional')} "
                             f"to {lead2['Name']} ({lead2.get('Website','')}). "
                             f"Goal: propose a referral partnership. Include a clear CTA. "
                             f"Keep it 120–150 words.")
@@ -342,7 +455,6 @@ with tab2:
         # AutoGPT webhook (optional)
         if autogpt_url:
             if st.button("Arm AutoGPT: watch for new high-score leads", key="btn_autogpt"):
-                import requests
                 payload = {"action":"lead_watch","query":cat,"city":city2,"state":state2,"threshold":85}
                 try:
                     r = requests.post(autogpt_url, json=payload, timeout=15)
@@ -362,15 +474,6 @@ with tab3:
     with c2:
         tone    = st.selectbox("Tone", ["Friendly","Professional","Hype"], index=0, key="out_tone")
         touches = st.slider("Number of touches", 3, 6, 3, key="out_touches")
-
-    # Pro playbook (LangChain) to suggest angles
-    if pro_enabled and LC_OK and st.toggle("Get AI Playbook (LangChain)", value=True, key="playbook_toggle"):
-        try:
-            playbook = lc_playbook(persona, target)
-            st.markdown("##### AI Playbook")
-            st.markdown(playbook)
-        except Exception as e:
-            st.warning(f"Playbook generation failed: {e}")
 
     if st.button("Generate Sequence", key="out_generate"):
         base = [
