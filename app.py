@@ -1,6 +1,6 @@
 # app.py — WavePilot Pro (single file)
 # Free: Trends + Leads + Outreach + Weekly Report
-# Pro: LangChain Enricher, LangGraph Orchestrator, CrewAI Growth Crew, AutoGPT Webhook
+# Pro: toggles are UI only unless dependencies are installed.
 # Includes “Warm up the AI” button for Render/Cloud cold starts
 
 import os, io, json, textwrap, datetime as dt
@@ -10,7 +10,7 @@ import streamlit as st
 import pandas as pd
 import requests
 
-# --------- Optional libs (guarded imports so app never hard-crashes) ---------
+# --------- Optional libs (graceful fallbacks) ---------
 DOCX_OK = True
 try:
     from docx import Document
@@ -29,7 +29,7 @@ try:
 except Exception:
     OpenAI = None
 
-# ---- Pro libs (each block is checked before use) ----
+# ---- Pro libs (checked before use; app won't crash if missing) ----
 LC_OK = LG_OK = LCO_OK = False
 try:
     from langchain_core.prompts import ChatPromptTemplate
@@ -263,13 +263,12 @@ def search_places_optional(query: str, city: str, state: str, limit: int = 12, a
 st.set_page_config(page_title="WavePilot — AI Growth Team (Pro)", page_icon="🌊", layout="wide")
 inject_css()
 
-# Warm-up button in sidebar
+# Sidebar: Warm-up + toggles
 wake_url = os.getenv("RENDER_WAKE_URL", "")
 if st.sidebar.button("🔥 Warm up the AI"):
     msg = warm_up_render(wake_url)
     (st.sidebar.success if msg.startswith("Warmed") else st.sidebar.warning)(msg)
 
-# “Pro” toggles
 use_langchain = st.sidebar.toggle("LangChain Enricher", value=False)
 use_langgraph = st.sidebar.toggle("LangGraph Orchestrator", value=False)
 use_crewai     = st.sidebar.toggle("CrewAI Growth Crew", value=False)
@@ -281,7 +280,7 @@ st.session_state.setdefault("reddit_mode", "hot")
 st.session_state.setdefault("out_persona", "Local Professional")
 
 st.title("🌊 WavePilot — AI Growth Team (Pro)")
-st.caption("Trends → Leads → Outreach (+ LangChain, LangGraph, CrewAI).")
+st.caption("Trends → Leads → Outreach (+ optional LangChain, LangGraph, CrewAI).")
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(
     ["Trend Rider", "Lead Finder", "Outreach Factory", "Weekly Report", "Pro Lab"]
@@ -290,8 +289,6 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(
 # ================= TREND RIDER =================
 with tab1:
     st.subheader("Trend Rider — ride what's hot")
-    with st.expander("How this helps", expanded=False):
-        st.write("Spot rising topics in your niche & city; publish content that meets demand now.")
     st.selectbox("Reddit ranking", ["hot","top"], index=0, key="reddit_mode")
 
     with st.form("trend_form"):
@@ -408,9 +405,36 @@ with tab2:
         with c2: kpi("Avg rating", f"{scored['Rating'].mean():.2f}" if len(scored) else "–")
         with c3: kpi("Median reviews", f"{int(scored['Reviews'].median())}" if len(scored) else "–")
 
+        # ---------------- Fixed selectbox & details panel ----------------
+        dff = scored.reset_index(drop=True).copy()
+        st.markdown("#### Ranked leads")
+        show_cols = ["Name","Score","Why","Rating","Reviews","Phone","Website","Address"]
+        st.dataframe(dff[show_cols], use_container_width=True)
+
+        if "Name" in dff.columns and len(dff) > 0:
+            name_choice = st.selectbox(
+                "Select a business",
+                list(dff["Name"].astype(str).unique())
+            )
+        else:
+            st.warning("No 'Name' column in the results.")
+            name_choice = None
+
+        if name_choice:
+            row = dff[dff["Name"].astype(str) == str(name_choice)].iloc[0].to_dict()
+            st.markdown(f"##### 📍 {row.get('Name','')}")
+            st.markdown(f"{row.get('Address','')}")
+            st.markdown(
+                f"- ⭐ **{row.get('Rating','—')}** ({row.get('Reviews','—')} reviews)\n"
+                f"- 📞 {row.get('Phone','—')}\n"
+                f"- 🌐 {row.get('Website','—')}\n"
+                f"- 🧭 [Open in Google Maps]({row.get('MapsUrl','')})"
+            )
+
+        # Map
         if MAPS_OK:
             st.markdown("#### Map")
-            dfc = scored.dropna(subset=["Lat","Lng"]).copy()
+            dfc = dff.dropna(subset=["Lat","Lng"]).copy()
             if not dfc.empty:
                 m = folium.Map(location=[dfc["Lat"].mean(), dfc["Lng"].mean()], zoom_start=12)
                 for _, r in dfc.iterrows():
@@ -426,40 +450,38 @@ with tab2:
         else:
             st.caption("Install folium + streamlit-folium to see the map.")
 
-        st.markdown("#### Ranked leads")
-        show_cols = ["Name","Score","Why","Rating","Reviews","Phone","Website","Address"]
-        st.dataframe(scored[show_cols], use_container_width=True)
-        st.download_button("⬇️ Export CSV", scored.to_csv(index=False).encode("utf-8"),
+        st.download_button("⬇️ Export CSV", dff[show_cols].to_csv(index=False).encode("utf-8"),
                            "leads.csv", "text/csv")
 
+        # One-click outreach
         st.markdown("#### One-click outreach")
-        pick2 = st.selectbox("Choose a lead", scored["Name"].tolist(), key="lead_pick")
-        lead2 = scored[scored["Name"] == pick2].iloc[0].to_dict()
+        if name_choice:
+            lead2 = dff[dff["Name"].astype(str) == str(name_choice)].iloc[0].to_dict()
+            colA, colB = st.columns(2)
+            with colA:
+                if st.button("Draft email", use_container_width=True, key="btn_email"):
+                    body = (llm(
+                        system="You write friendly B2B outreach for local partnerships.",
+                        prompt=(f"Draft a short email from a {st.session_state.get('out_persona','Local Professional')} "
+                                f"to {lead2['Name']} ({lead2.get('Website','')}). "
+                                f"Goal: propose a referral partnership. Include a clear CTA. "
+                                f"Keep it 120–150 words.")
+                    ) or
+                    f"Hi {lead2['Name']} team,\n\nI’d love to explore a simple referral partnership. "
+                    "We serve the same customers and can help each other win more business. "
+                    "Could we schedule a 10-minute chat this week?\n\nBest,\n<Your Name>")
+                    st.code(body)
+            with colB:
+                if st.button("Draft SMS", use_container_width=True, key="btn_sms"):
+                    sms = (llm(
+                        system="You write concise SMS for local B2B outreach.",
+                        prompt=(f"Write a friendly 240-character text to {lead2['Name']} proposing a quick chat about referrals. "
+                                f"One clear CTA.")
+                    ) or
+                    f"Hi {lead2['Name']}! Quick idea: partner on referrals? 10-min chat this week?")
+                    st.code(sms)
 
-        colA, colB = st.columns(2)
-        with colA:
-            if st.button("Draft email", use_container_width=True, key="btn_email"):
-                body = (llm(
-                    system="You write friendly B2B outreach for local partnerships.",
-                    prompt=(f"Draft a short email from a {st.session_state.get('out_persona','Local Professional')} "
-                            f"to {lead2['Name']} ({lead2.get('Website','')}). "
-                            f"Goal: propose a referral partnership. Include a clear CTA. "
-                            f"Keep it 120–150 words.")
-                ) or
-                f"Hi {lead2['Name']} team,\n\nI’d love to explore a simple referral partnership. "
-                "We serve the same customers and can help each other win more business. "
-                "Could we schedule a 10-minute chat this week?\n\nBest,\n<Your Name>")
-                st.code(body)
-        with colB:
-            if st.button("Draft SMS", use_container_width=True, key="btn_sms"):
-                sms = (llm(
-                    system="You write concise SMS for local B2B outreach.",
-                    prompt=(f"Write a friendly 240-character text to {lead2['Name']} proposing a quick chat about referrals. "
-                            f"One clear CTA.")
-                ) or
-                f"Hi {lead2['Name']}! Quick idea: partner on referrals? 10-min chat this week?")
-                st.code(sms)
-
+        # AutoGPT webhook (optional)
         if autogpt_url:
             if st.button("Arm AutoGPT: watch for new high-score leads", key="btn_autogpt"):
                 payload = {"action":"lead_watch","query":cat,"city":city2,"state":state2,"threshold":85}
@@ -550,13 +572,13 @@ with tab4:
                 "weekly_report.docx",
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
-# ===================== PRO LAB =====================
+# ===================== PRO LAB (stubs if libs missing) =====================
 with tab5:
-    st.subheader("Pro Lab — LangChain · LangGraph · CrewAI")
-    st.caption("These tools automate deeper research and polished output. They’re optional; the app runs without them.")
+    st.subheader("Pro Lab — LangChain · LangGraph · CrewAI (optional)")
+    st.caption("These automate deeper research/polish. The app runs fine without them.")
 
-    # ---------- LangChain Enricher ----------
-    st.markdown("### LangChain Enricher (adds reasons & scores to top leads)")
+    # LangChain Enricher (stubbed if missing)
+    st.markdown("### LangChain Enricher")
     if not use_langchain:
         st.info("Toggle **LangChain Enricher** in the sidebar to enable.")
     elif not (LC_OK and LCO_OK and OPENAI_API_KEY):
@@ -566,13 +588,9 @@ with tab5:
         if isinstance(leads_df, pd.DataFrame) and not leads_df.empty:
             top_n = st.slider("How many leads to enrich?", 3, 15, 5, key="lc_topn")
             model = ChatOpenAI(model="gpt-4o-mini", temperature=0.2, api_key=OPENAI_API_KEY)
-
             prompt = ChatPromptTemplate.from_template(
-                "Rate the partner fit for the business seeking referrals.\n"
-                "Lead: {lead}\n"
-                "Return JSON with keys: fit(1-100), why, next_action.\n"
+                "Rate partner fit for referrals.\nLead: {lead}\nReturn JSON: fit(1-100), why, next_action."
             )
-
             enriched_rows=[]
             for _, row in leads_df.head(top_n).iterrows():
                 lead_json = row.to_dict()
@@ -583,7 +601,6 @@ with tab5:
                     try:
                         data = json.loads(txt)
                     except Exception:
-                        # attempt to extract JSON-like chunk
                         start = txt.find("{"); end = txt.rfind("}")
                         if start!=-1 and end!=-1:
                             data = json.loads(txt[start:end+1])
@@ -595,16 +612,14 @@ with tab5:
                     })
                 except Exception as e:
                     enriched_rows.append({"Name": row["Name"], "LC_Fit": 50, "LC_Why": f"error: {e}", "LC_Next": ""})
-
             st.dataframe(pd.DataFrame(enriched_rows), use_container_width=True)
         else:
             st.info("Run **Lead Finder** first so we have leads to enrich.")
 
     st.divider()
 
-    # ---------- LangGraph Orchestrator ----------
-    st.markdown("### LangGraph Orchestrator (tiny state machine for ‘what to do now’)")
-
+    # LangGraph Orchestrator (stubbed if missing)
+    st.markdown("### LangGraph Orchestrator")
     if not use_langgraph:
         st.info("Toggle **LangGraph Orchestrator** in the sidebar to enable.")
     elif not (LG_OK and LCO_OK and OPENAI_API_KEY):
@@ -614,58 +629,44 @@ with tab5:
         if not trend_data:
             st.info("Fetch trends in **Trend Rider** first.")
         else:
-            # Build a micro-graph: decide node -> (research or create) -> END
             from typing import TypedDict
-
             class S(TypedDict):
                 intent: str
                 brief: str
-
             model = ChatOpenAI(model="gpt-4o-mini", temperature=0.2, api_key=OPENAI_API_KEY)
-
             def decide(state: S) -> S:
                 rising = trend_data.get("google_trends", {}).get("rising", [])
                 hot = len([r for r in rising if r.get("value",0) >= 100]) >= 3
                 state["intent"] = "content" if hot else "research"
                 return state
-
             def do_research(state: S) -> S:
                 msg = model.invoke(f"Summarize 5 bullet insights from:\n{json.dumps(trend_data)[:6000]}")
                 state["brief"] = (msg.content or "").strip()
                 return state
-
             def do_content(state: S) -> S:
                 msg = model.invoke("Draft 3 short post ideas with hooks + CTAs for a local business based on these trends:\n"
                                    + json.dumps(trend_data)[:6000])
                 state["brief"] = (msg.content or "").strip()
                 return state
-
             g = StateGraph(S)
             g.add_node("decide", decide)
             g.add_node("research", do_research)
             g.add_node("content", do_content)
             g.set_entry_point("decide")
-            # edges
-            if LG_OK:
-                from langgraph.graph import START
-            # explicit routing after decide:
             def router(state: S):
                 return state["intent"]
             g.add_conditional_edges("decide", router, {"research":"research","content":"content"})
             g.add_edge("research", END)
             g.add_edge("content", END)
             app = g.compile()
-
-            state = {"intent":"", "brief":""}
-            out = app.invoke(state)
+            out = app.invoke({"intent":"", "brief":""})
             st.info(f"Intent: **{out['intent']}**")
             st.markdown(out["brief"])
 
     st.divider()
 
-    # ---------- CrewAI Growth Crew ----------
-    st.markdown("### CrewAI Growth Crew (Researcher + Copywriter)")
-
+    # CrewAI Growth Crew (stubbed if missing)
+    st.markdown("### CrewAI Growth Crew")
     if not use_crewai:
         st.info("Toggle **CrewAI Growth Crew** in the sidebar to enable.")
     elif not (CREW_OK and OPENAI_API_KEY):
@@ -690,14 +691,8 @@ with tab5:
                 verbose=False,
                 llm=ChatOpenAI(model="gpt-4o-mini", temperature=0.3, api_key=OPENAI_API_KEY),
             )
-            t1 = Task(
-                description=f"Summarize 5 bullet insights for {biz} ({niche}). Provide sources if relevant.",
-                agent=researcher,
-            )
-            t2 = Task(
-                description="Write a 1-page brief with headline, 3 bullets, 1 CTA. Make it print-friendly.",
-                agent=writer,
-            )
+            t1 = Task(description=f"Summarize 5 bullet insights for {biz} ({niche}). Provide sources if relevant.", agent=researcher)
+            t2 = Task(description="Write a 1-page brief with headline, 3 bullets, 1 CTA. Make it print-friendly.", agent=writer)
             crew = Crew(agents=[researcher, writer], tasks=[t1, t2])
             try:
                 result = crew.kickoff()
