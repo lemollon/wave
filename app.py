@@ -1,18 +1,19 @@
-# app.py — WavePilot v0.1.1
+# app.py — WavePilot v0.1.2
 # Tabs:
 # 1) Trend Rider (Google Trends + Reddit + optional YouTube)
 # 2) Lead Finder (Google Places New) — map + table
 # 3) Outreach Factory (AI-polished emails/SMS + TXT/DOCX export)
 # 4) Weekly Report (TXT/DOCX export)
 #
-# Fixes in this release:
-# - Persist results with st.session_state (no more flash-then-disappear)
+# Fixes:
+# - Persist results with st.session_state (no flash-then-disappear)
 # - Hide debug JSON by default (toggle to show)
-# - Reddit 401 handled gracefully + Hot/Top switch
+# - Reddit handled gracefully
 # - Unique keys for all widgets
+# - NEW: Backward-compatible gather_trends_safe() so you don't need to update tools/trends.py
 
 import os, io, json, textwrap, datetime as dt
-from typing import List, Dict
+from typing import Dict
 
 import streamlit as st
 import pandas as pd
@@ -25,7 +26,7 @@ try:
 except Exception:
     DOCX_OK = False
 
-# Optional map
+# Map
 try:
     import folium
     from streamlit_folium import st_folium
@@ -33,14 +34,14 @@ try:
 except Exception:
     MAPS_OK = False
 
-# Optional OpenAI for copy polish
+# OpenAI (optional)
 try:
     from openai import OpenAI
 except Exception:
     OpenAI = None
 
-from tools.trends import gather_trends
-from tools.places import search_places_optional
+from tools.trends import gather_trends   # your existing file is fine
+from tools.places import search_places_optional  # your existing file is fine
 
 # ----------------- helpers -----------------
 def _env(name: str, default: str = "") -> str:
@@ -53,67 +54,65 @@ def llm_ok() -> bool:
     return client is not None
 
 def llm(prompt: str, system: str = "You are a helpful marketer.", temp: float = 0.4) -> str:
-    """Small wrapper around OpenAI chat. Returns '' if not configured."""
     if not llm_ok():
         return ""
     try:
         r = client.chat.completions.create(
             model="gpt-4o-mini",
             temperature=temp,
-            messages=[{"role": "system", "content": system},
-                      {"role": "user", "content": prompt}]
+            messages=[{"role":"system","content":system},{"role":"user","content":prompt}]
         )
         return (r.choices[0].message.content or "").strip()
     except Exception as e:
         return f"(AI unavailable: {e})"
 
 def build_docx_bytes(title: str, body_md: str) -> bytes:
-    if not DOCX_OK:
-        return b""
-    doc = Document()
-    doc.add_heading(title, level=1)
+    if not DOCX_OK: return b""
+    doc = Document(); doc.add_heading(title, level=1)
     for para in body_md.split("\n\n"):
-        if para.strip():
-            doc.add_paragraph(para.strip())
-    buf = io.BytesIO()
-    doc.save(buf)
-    buf.seek(0)
-    return buf.read()
+        if para.strip(): doc.add_paragraph(para.strip())
+    buf = io.BytesIO(); doc.save(buf); buf.seek(0); return buf.read()
 
 def inject_css():
-    st.markdown(
-        """
-        <style>
-        .kpi-card {border:1px solid #2b2f36;border-radius:12px;padding:12px 16px;background:#0e1117}
-        .kpi-label {font-size:.85rem;opacity:.85}
-        .kpi-value {font-weight:800;font-size:1.2rem;margin-top:2px}
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
+    st.markdown("""
+    <style>
+    .kpi-card {border:1px solid #2b2f36;border-radius:12px;padding:12px 16px;background:#0e1117}
+    .kpi-label {font-size:.85rem;opacity:.85}
+    .kpi-value {font-weight:800;font-size:1.2rem;margin-top:2px}
+    </style>
+    """, unsafe_allow_html=True)
 
 def kpi(label: str, value: str):
-    st.markdown(
-        f"""
-        <div class="kpi-card">
-          <div class="kpi-label">{label}</div>
-          <div class="kpi-value">{value}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    st.markdown(f"""
+    <div class="kpi-card">
+      <div class="kpi-label">{label}</div>
+      <div class="kpi-value">{value}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+# ---- backward-compatible wrapper for gather_trends ----
+def gather_trends_safe(**kwargs) -> Dict:
+    """
+    Try calling tools.trends.gather_trends with all kwargs.
+    If the installed function doesn't accept a kw (e.g., reddit_mode),
+    retry without it so older deployments don't crash.
+    """
+    try:
+        return gather_trends(**kwargs)
+    except TypeError:
+        kwargs.pop("reddit_mode", None)
+        return gather_trends(**kwargs)
 
 # ----------------- page + state -----------------
 st.set_page_config(page_title="WavePilot — AI Growth Team", page_icon="🌊", layout="wide")
 inject_css()
 
-# caches so results persist after reruns
 st.session_state.setdefault("trend_data_cache", None)
 st.session_state.setdefault("lead_data_cache", None)
 st.session_state.setdefault("reddit_mode", "hot")
 
 st.title("🌊 WavePilot — AI Growth Team for Local Businesses")
-st.caption("Powered by **LangChain-style tools**, **Crew-ready roles**, and an optional **AutoGPT watcher**. Free trend intel via Google Trends + Reddit.")
+st.caption("Free trend intel (Google Trends + Reddit), optional local leads (Google Places), AI outreach & exports.")
 
 tab1, tab2, tab3, tab4 = st.tabs(["Trend Rider", "Lead Finder", "Outreach Factory", "Weekly Report"])
 
@@ -121,14 +120,10 @@ tab1, tab2, tab3, tab4 = st.tabs(["Trend Rider", "Lead Finder", "Outreach Factor
 with tab1:
     st.subheader("Trend Rider — ride what's hot (free data)")
     with st.expander("How this helps", expanded=False):
-        st.write("Find rising topics and hot discussions so your content rides current demand in your niche & city.")
+        st.write("Find rising topics and hot discussions so your content rides current demand.")
 
-    # OFF by default; flip only when you want to see raw JSON
     show_debug = st.toggle("Show debug JSON (advanced)", value=False, key="trend_debug")
-
-    # Reddit ranking selection
-    st.selectbox("Reddit ranking", ["hot", "top"], index=0, key="reddit_mode",
-                 help="If Reddit shows 401, double-check your Reddit keys. Other sections still work.")
+    st.selectbox("Reddit ranking", ["hot","top"], index=0, key="reddit_mode")
 
     with st.form("trend_form"):
         niche = st.text_input("Niche keywords (comma-separated)",
@@ -138,21 +133,21 @@ with tab1:
         subs  = st.text_input("Reddit subs (comma-separated)",
                               "RealEstate, Austin, personalfinance", key="trend_subs")
         timeframe = st.selectbox("Google Trends timeframe",
-                                 ["now 7-d", "now 1-d", "now 30-d", "today 3-m"],
+                                 ["now 7-d","now 1-d","now 30-d","today 3-m"],
                                  index=0, key="trend_timeframe")
         submitted = st.form_submit_button("Fetch trends", key="trend_submit")
 
     if submitted:
         keywords = [s.strip() for s in niche.split(",") if s.strip()]
         sub_list = [s.strip() for s in subs.split(",") if s.strip()]
-        data = gather_trends(
+        data = gather_trends_safe(
             niche_keywords=keywords,
             city=city,
             state=state,
             subs=sub_list,
             timeframe=timeframe,
-            youtube_api_key=_env("YOUTUBE_API_KEY", ""),
-            reddit_mode=st.session_state.reddit_mode,
+            youtube_api_key=_env("YOUTUBE_API_KEY",""),
+            reddit_mode=st.session_state.reddit_mode,   # removed automatically if your trends.py doesn't support it
         )
         st.session_state.trend_data_cache = data
 
@@ -163,40 +158,36 @@ with tab1:
         if show_debug:
             st.json(data.get("inputs", {}))
 
-        # Google Trends — Rising
         gt = data.get("google_trends", {})
         rising = pd.DataFrame(gt.get("rising", []))
         st.markdown("### Google Trends — Rising Queries")
         if not rising.empty:
-            st.dataframe(rising[["keyword", "query", "value", "link"]], use_container_width=True)
+            st.dataframe(rising[["keyword","query","value","link"]], use_container_width=True)
         else:
-            st.info(gt.get("error", "No rising queries (or pytrends missing)."))
+            st.info(gt.get("error","No rising queries (or pytrends missing)."))
 
-        # Reddit
         st.markdown("### Reddit — Hot Posts")
         rd = data.get("reddit", {})
         if err := rd.get("error"):
             st.warning(f"Reddit: {err} • Check REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET / REDDIT_USER_AGENT.")
         posts = pd.DataFrame(rd.get("posts", []))
         if not posts.empty:
-            st.dataframe(posts[["subreddit", "title", "score", "url"]].head(20), use_container_width=True)
+            st.dataframe(posts[["subreddit","title","score","url"]].head(20), use_container_width=True)
         else:
             if not err:
                 st.info("No Reddit posts found for those subs.")
 
-        # YouTube (optional)
         st.markdown("### YouTube — Fresh Videos (optional)")
         yt = data.get("youtube", {})
         vids = pd.DataFrame(yt.get("items", []))
         if not vids.empty:
-            st.dataframe(vids[["title", "channel", "publishedAt", "url"]], use_container_width=True)
+            st.dataframe(vids[["title","channel","publishedAt","url"]], use_container_width=True)
         else:
             if yterr := yt.get("error"):
                 st.caption(f"YouTube: {yterr}")
             else:
                 st.caption("Add YOUTUBE_API_KEY to show this section.")
 
-        # AI summary
         st.markdown("### AI Market Summary")
         sample = {
             "trending_queries": rising.head(8).to_dict(orient="records") if not rising.empty else [],
@@ -205,7 +196,7 @@ with tab1:
         summary = llm(
             system="You are a concise SMB strategist.",
             prompt=(f"Summarize in ~5 bullets what is trending for {city}, {state} in niche {niche}. "
-                    f"Then propose 3 ride-the-wave post ideas. Data:\n{json.dumps(sample)}"),
+                    f"Then propose 3 ride-the-wave post ideas. Data:\n{json.dumps(sample)}")
         ) or "Add OPENAI_API_KEY to enable AI-written summaries."
         st.info(summary)
 
@@ -213,10 +204,7 @@ with tab1:
 with tab2:
     st.subheader("Lead Finder — Nearby partners & feeder businesses")
     with st.expander("How this helps", expanded=True):
-        st.markdown(
-            "We use Google Places (New) to find **feeder businesses**—partners that interact with your future "
-            "customers (e.g., apartment complexes, movers, mortgage brokers for real estate). Partner with them for warm referrals."
-        )
+        st.markdown("We use Google Places (New) to find **feeder businesses**—partners that interact with your future customers (e.g., apartment complexes, movers, mortgage brokers for real estate). Partner with them for warm referrals.")
 
     with st.form("lead_form"):
         cat   = st.text_input("Place type / query", "apartment complex", key="lead_cat")
@@ -226,8 +214,7 @@ with tab2:
         go    = st.form_submit_button("Search", key="lead_submit")
 
     if go:
-        df = search_places_optional(cat, city2, state2, limit=limit, api_key=_env("GOOGLE_PLACES_API_KEY", ""))
-        # store even if empty (so we render a friendly message instead of flashing)
+        df = search_places_optional(cat, city2, state2, limit=limit, api_key=_env("GOOGLE_PLACES_API_KEY",""))
         st.session_state.lead_data_cache = df if df is not None else False
 
     df = st.session_state.lead_data_cache
@@ -241,10 +228,9 @@ with tab2:
         with c2: kpi("Avg rating", f"{df['Rating'].mean():.2f}" if len(df) else "–")
         with c3: kpi("Median reviews", f"{int(df['Reviews'].median())}" if len(df) else "–")
 
-        # Map
         if MAPS_OK:
             st.markdown("#### Map")
-            dfc = df.dropna(subset=["Lat", "Lng"]).copy()
+            dfc = df.dropna(subset=["Lat","Lng"]).copy()
             if not dfc.empty:
                 m = folium.Map(location=[dfc["Lat"].mean(), dfc["Lng"].mean()], zoom_start=12)
                 for _, r in dfc.iterrows():
@@ -260,36 +246,33 @@ with tab2:
             st.caption("Install folium + streamlit-folium to see the map.")
 
         st.markdown("#### Table")
-        st.dataframe(df[["Name", "Rating", "Reviews", "Address"]], use_container_width=True)
+        st.dataframe(df[["Name","Rating","Reviews","Address"]], use_container_width=True)
 
 # ================= OUTREACH FACTORY =================
 with tab3:
     st.subheader("Outreach Factory — ready-to-send sequences")
-    st.caption("AI-polished emails/SMS with **fixed send dates**. Export as TXT/DOCX.")
+    st.caption("AI-polished emails/SMS with fixed send dates. Export as TXT/DOCX.")
 
     c1, c2 = st.columns(2)
     with c1:
         persona = st.text_input("Your business type", "Real Estate Agent", key="out_persona")
         target  = st.text_input("Target audience", "Apartment complex managers in Katy, TX", key="out_target")
     with c2:
-        tone    = st.selectbox("Tone", ["Friendly", "Professional", "Hype"], index=0, key="out_tone")
+        tone    = st.selectbox("Tone", ["Friendly","Professional","Hype"], index=0, key="out_tone")
         touches = st.slider("Number of touches", 3, 6, 3, key="out_touches")
 
     if st.button("Generate Sequence", key="out_generate"):
         base = [
-            {"send_dt": str(dt.date.today()),                       "channel": "email", "subject": "Quick hello 👋",
-             "body": f"Hi there — I’m a {persona} in {target}. Could we collaborate?"},
-            {"send_dt": str(dt.date.today() + dt.timedelta(days=2)),"channel": "sms",   "subject": "",
-             "body": "Hey! Just checking in — open to a quick chat this week?"},
-            {"send_dt": str(dt.date.today() + dt.timedelta(days=7)),"channel": "email", "subject": "Ready when you are",
-             "body": "Happy to help with referrals and co-marketing. What works?"}
+            {"send_dt": str(dt.date.today()),                       "channel": "email", "subject": "Quick hello 👋", "body": f"Hi there — I’m a {persona} in {target}. Could we collaborate?"},
+            {"send_dt": str(dt.date.today() + dt.timedelta(days=2)),"channel": "sms",   "subject": "",               "body": "Hey! Just checking in — open to a quick chat this week?"},
+            {"send_dt": str(dt.date.today() + dt.timedelta(days=7)),"channel": "email", "subject": "Ready when you are", "body": "Happy to help with referrals and co-marketing. What works?"}
         ]
         base = base[:touches]
 
         prompt = (
             f"Polish this outreach for a {persona} to contact {target}. "
             f"Keep SAME dates and channels. Tone: {tone}. Return PLAIN TEXT (not JSON). "
-            f"Here are the steps as JSON for you to reference:\n{json.dumps(base)}"
+            f"Here are the steps as JSON for your reference:\n{json.dumps(base)}"
         )
         polished = llm(prompt, system="You write high-converting SMB outreach.") or \
                    "\n".join([f"{s['send_dt']} • {s['channel']}: {s['subject']} {s['body']}".strip() for s in base])
@@ -299,12 +282,10 @@ with tab3:
 
         st.download_button("⬇️ Download TXT", polished.encode("utf-8"), "outreach.txt", "text/plain")
         if DOCX_OK:
-            st.download_button(
-                "⬇️ Download DOCX",
-                build_docx_bytes("Outreach Plan", polished),
-                "outreach.docx",
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            )
+            st.download_button("⬇️ Download DOCX",
+                               build_docx_bytes("Outreach Plan", polished),
+                               "outreach.docx",
+                               "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
         else:
             st.caption("Install `python-docx` for DOCX export.")
 
@@ -340,9 +321,7 @@ with tab4:
         st.text(report)
         st.download_button("⬇️ Download TXT", report.encode("utf-8"), "weekly_report.txt", "text/plain")
         if DOCX_OK:
-            st.download_button(
-                "⬇️ Download DOCX",
-                build_docx_bytes("Weekly Report", report),
-                "weekly_report.docx",
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            )
+            st.download_button("⬇️ Download DOCX",
+                               build_docx_bytes("Weekly Report", report),
+                               "weekly_report.docx",
+                               "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
