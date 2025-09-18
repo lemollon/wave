@@ -1,0 +1,24 @@
+streamlit>=1.32.0
+pandas>=2.2.0
+requests>=2.31.0
+altair>=5.2.0
+openai>=1.40.0
+
+# trends (free)
+pytrends>=4.9.2
+praw>=7.7.1
+
+# maps / optional places
+folium>=0.15.1
+streamlit-folium>=0.18.0
+
+# backend / crew
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+langchain>=0.2.7
+langchain-community>=0.2.6
+pydantic>=2.7.1
+crewai>=0.30.11
+
+# exports
+python-docx>=0.8.11
