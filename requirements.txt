@@ -19,9 +19,3 @@ openai==1.52.0
 
 # --- Visualization (optional) ---
 altair==5.3.0
-
-# --- PRO (optional; app degrades gracefully if you remove these) ---
-langchain==0.2.16
-langgraph==0.2.22
-langchain-openai==0.1.22
-crewai==0.51.0
