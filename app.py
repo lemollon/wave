@@ -1,7 +1,7 @@
-# app.py — WavePilot (single-file)
+# app.py — WavePilot Pro (single file)
 # Free: Trends + Leads + Outreach + Weekly Report
-# Pro toggles are safe (UI-only if deps not installed)
-# Includes "Warm up the AI" button for Render/Cloud cold starts
+# Pro: LangChain Enricher, LangGraph Orchestrator, CrewAI Growth Crew, AutoGPT Webhook
+# Includes “Warm up the AI” button for Render/Cloud cold starts
 
 import os, io, json, textwrap, datetime as dt
 from typing import Dict, List, Optional
@@ -10,7 +10,7 @@ import streamlit as st
 import pandas as pd
 import requests
 
-# ---------- Optional libs (graceful fallbacks) ----------
+# --------- Optional libs (guarded imports so app never hard-crashes) ---------
 DOCX_OK = True
 try:
     from docx import Document
@@ -29,6 +29,33 @@ try:
 except Exception:
     OpenAI = None
 
+# ---- Pro libs (each block is checked before use) ----
+LC_OK = LG_OK = LCO_OK = False
+try:
+    from langchain_core.prompts import ChatPromptTemplate
+    LC_OK = True
+except Exception:
+    LC_OK = False
+
+try:
+    from langgraph.graph import StateGraph, END
+    LG_OK = True
+except Exception:
+    LG_OK = False
+
+try:
+    from langchain_openai import ChatOpenAI
+    LCO_OK = True
+except Exception:
+    LCO_OK = False
+
+CREW_OK = False
+try:
+    from crewai import Agent, Task, Crew
+    CREW_OK = True
+except Exception:
+    CREW_OK = False
+
 # ------------------- ENV / LLM helpers -------------------
 def _env(k: str, d: str = "") -> str:
     return os.getenv(k, d)
@@ -46,10 +73,7 @@ def llm(prompt: str, system: str = "You are a helpful marketer.", temp: float = 
         r = client.chat.completions.create(
             model="gpt-4o-mini",
             temperature=temp,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": prompt},
-            ],
+            messages=[{"role":"system","content":system},{"role":"user","content":prompt}],
         )
         return (r.choices[0].message.content or "").strip()
     except Exception as e:
@@ -109,7 +133,6 @@ def warm_up_render(url: str, timeout: int = 10) -> str:
         return f"Warm-up failed: {e}"
 
 # --------------------- Trends (inline) --------------------
-# (Uses pytrends + praw if installed; otherwise returns a friendly error)
 def google_trends_rising(keywords: List[str], geo="US", timeframe="now 7-d") -> Dict:
     try:
         from pytrends.request import TrendReq
@@ -197,7 +220,6 @@ def gather_trends(niche_keywords: List[str], city="", state="", subs: Optional[L
 
 # ------------------ Google Places (inline) ----------------
 def search_places_optional(query: str, city: str, state: str, limit: int = 12, api_key: str = "") -> Optional[pd.DataFrame]:
-    """Google Places (New) Text Search → DataFrame with Name, Rating, Reviews, Phone, Website, Address, Lat, Lng, MapsUrl."""
     if not api_key:
         return None
     text_url = "https://places.googleapis.com/v1/places:searchText"
@@ -238,7 +260,7 @@ def search_places_optional(query: str, city: str, state: str, limit: int = 12, a
     return df
 
 # ----------------- Streamlit app setup -------------------
-st.set_page_config(page_title="WavePilot — AI Growth Team", page_icon="🌊", layout="wide")
+st.set_page_config(page_title="WavePilot — AI Growth Team (Pro)", page_icon="🌊", layout="wide")
 inject_css()
 
 # Warm-up button in sidebar
@@ -247,27 +269,29 @@ if st.sidebar.button("🔥 Warm up the AI"):
     msg = warm_up_render(wake_url)
     (st.sidebar.success if msg.startswith("Warmed") else st.sidebar.warning)(msg)
 
-# “Pro” toggles (safe if libs missing)
-pro_enabled = st.sidebar.toggle("Enable Pro Orchestrator (LangChain/LangGraph)", value=False)
-crew_enabled = st.sidebar.toggle("Enable Growth Crew (CrewAI)", value=False)
-autogpt_url = st.sidebar.text_input("AutoGPT Webhook URL (optional)", _env("AUTOGPT_URL",""))
+# “Pro” toggles
+use_langchain = st.sidebar.toggle("LangChain Enricher", value=False)
+use_langgraph = st.sidebar.toggle("LangGraph Orchestrator", value=False)
+use_crewai     = st.sidebar.toggle("CrewAI Growth Crew", value=False)
+autogpt_url    = st.sidebar.text_input("AutoGPT Webhook URL (optional)", _env("AUTOGPT_URL",""))
 
 st.session_state.setdefault("trend_data_cache", None)
 st.session_state.setdefault("lead_data_cache", None)
 st.session_state.setdefault("reddit_mode", "hot")
 st.session_state.setdefault("out_persona", "Local Professional")
 
-st.title("🌊 WavePilot — AI Growth Team for Local Businesses")
-st.caption("Trends → Leads → Outreach. Optional automations available, but not required.")
+st.title("🌊 WavePilot — AI Growth Team (Pro)")
+st.caption("Trends → Leads → Outreach (+ LangChain, LangGraph, CrewAI).")
 
-tab1, tab2, tab3, tab4 = st.tabs(["Trend Rider", "Lead Finder", "Outreach Factory", "Weekly Report"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    ["Trend Rider", "Lead Finder", "Outreach Factory", "Weekly Report", "Pro Lab"]
+)
 
 # ================= TREND RIDER =================
 with tab1:
-    st.subheader("Trend Rider — ride what's hot (free data)")
+    st.subheader("Trend Rider — ride what's hot")
     with st.expander("How this helps", expanded=False):
-        st.write("Spot rising topics and hot discussions in your niche & city so your content rides current demand.")
-    show_debug = st.toggle("Show debug JSON (advanced)", value=False, key="trend_debug")
+        st.write("Spot rising topics in your niche & city; publish content that meets demand now.")
     st.selectbox("Reddit ranking", ["hot","top"], index=0, key="reddit_mode")
 
     with st.form("trend_form"):
@@ -295,27 +319,21 @@ with tab1:
     if not data:
         st.info("Enter your niche/city and click **Fetch trends**.")
     else:
-        if show_debug:
-            st.json(data.get("inputs", {}))
-
-        gt = data.get("google_trends", {})
-        rising = pd.DataFrame(gt.get("rising", []))
+        rising = pd.DataFrame(data.get("google_trends", {}).get("rising", []))
         st.markdown("### Google Trends — Rising Queries")
         if not rising.empty:
             st.dataframe(rising[["keyword","query","value","link"]], use_container_width=True)
         else:
-            st.info(gt.get("error","No rising queries (or pytrends missing)."))
+            st.info("No rising queries or pytrends missing.")
 
         st.markdown("### Reddit — Hot Posts")
         rd = data.get("reddit", {})
-        if err := rd.get("error"):
-            st.warning(f"Reddit: {err} • Check REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET / REDDIT_USER_AGENT.")
+        if rd.get("error"): st.warning(f"Reddit: {rd['error']}")
         posts = pd.DataFrame(rd.get("posts", []))
         if not posts.empty:
             st.dataframe(posts[["subreddit","title","score","url"]].head(20), use_container_width=True)
         else:
-            if not err:
-                st.info("No Reddit posts found for those subs.")
+            st.info("No Reddit posts found or credentials missing.")
 
         st.markdown("### YouTube — Fresh Videos (optional)")
         yt = data.get("youtube", {})
@@ -323,10 +341,8 @@ with tab1:
         if not vids.empty:
             st.dataframe(vids[["title","channel","publishedAt","url"]], use_container_width=True)
         else:
-            if yterr := yt.get("error"):
-                st.caption(f"YouTube: {yterr}")
-            else:
-                st.caption("Add YOUTUBE_API_KEY to show this section.")
+            if yt.get("error"): st.caption(f"YouTube: {yt['error']}")
+            else: st.caption("Add YOUTUBE_API_KEY to show videos.")
 
         st.markdown("### AI Market Summary")
         sample = {
@@ -346,10 +362,9 @@ with tab2:
     with st.expander("How this helps", expanded=True):
         st.markdown(
             "- We surface **feeder businesses** that meet your future customers first.\n"
-            "- You get **phone, website, and directions** to start a partnership.\n"
+            "- You get **phone, website, directions** to start a partnership.\n"
             "- We compute an **Actionability Score** and explain **why** each lead is hot.\n"
         )
-
     with st.form("lead_form"):
         cat   = st.text_input("Place type / query", "apartment complex", key="lead_cat")
         city2 = st.text_input("City", "Katy", key="lead_city")
@@ -378,7 +393,7 @@ with tab2:
     if df is None:
         st.info("Enter a query (e.g., **apartment complex**, **moving company**, **mortgage broker**, **home builder**).")
     elif df is False or (isinstance(df, pd.DataFrame) and df.empty):
-        st.warning("No results (check your GOOGLE_PLACES_API_KEY or try a nearby city/another query).")
+        st.warning("No results (check GOOGLE_PLACES_API_KEY or try a nearby city/another query).")
     else:
         scored = df.copy()
         scored["Score"] = 0
@@ -417,7 +432,6 @@ with tab2:
         st.download_button("⬇️ Export CSV", scored.to_csv(index=False).encode("utf-8"),
                            "leads.csv", "text/csv")
 
-        # One-click outreach (AI-polished)
         st.markdown("#### One-click outreach")
         pick2 = st.selectbox("Choose a lead", scored["Name"].tolist(), key="lead_pick")
         lead2 = scored[scored["Name"] == pick2].iloc[0].to_dict()
@@ -446,13 +460,6 @@ with tab2:
                 f"Hi {lead2['Name']}! Quick idea: partner on referrals? 10-min chat this week?")
                 st.code(sms)
 
-        st.markdown(
-            f"- 📞 **Phone:** {lead2.get('Phone','—')}  \n"
-            f"- 🌐 **Website:** {('['+lead2['Website']+']('+lead2['Website']+')') if lead2.get('Website') else '—'}  \n"
-            f"- 🗺️ **Maps:** {('['+lead2.get('Address','Maps')+']('+lead2.get('MapsUrl','')+')') if lead2.get('MapsUrl') else '—'}"
-        )
-
-        # AutoGPT webhook (optional)
         if autogpt_url:
             if st.button("Arm AutoGPT: watch for new high-score leads", key="btn_autogpt"):
                 payload = {"action":"lead_watch","query":cat,"city":city2,"state":state2,"threshold":85}
@@ -485,7 +492,6 @@ with tab3:
              "body": "Happy to help with referrals and co-marketing. What works?"}
         ]
         base = base[:touches]
-
         prompt = (
             f"Polish this outreach for a {persona} to contact {target}. "
             f"Keep SAME dates and channels. Tone: {tone}. Return PLAIN TEXT (not JSON). "
@@ -543,3 +549,159 @@ with tab4:
                 build_docx_bytes("Weekly Report", report),
                 "weekly_report.docx",
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+
+# ===================== PRO LAB =====================
+with tab5:
+    st.subheader("Pro Lab — LangChain · LangGraph · CrewAI")
+    st.caption("These tools automate deeper research and polished output. They’re optional; the app runs without them.")
+
+    # ---------- LangChain Enricher ----------
+    st.markdown("### LangChain Enricher (adds reasons & scores to top leads)")
+    if not use_langchain:
+        st.info("Toggle **LangChain Enricher** in the sidebar to enable.")
+    elif not (LC_OK and LCO_OK and OPENAI_API_KEY):
+        st.warning("LangChain libraries or OPENAI_API_KEY missing.")
+    else:
+        leads_df = st.session_state.lead_data_cache
+        if isinstance(leads_df, pd.DataFrame) and not leads_df.empty:
+            top_n = st.slider("How many leads to enrich?", 3, 15, 5, key="lc_topn")
+            model = ChatOpenAI(model="gpt-4o-mini", temperature=0.2, api_key=OPENAI_API_KEY)
+
+            prompt = ChatPromptTemplate.from_template(
+                "Rate the partner fit for the business seeking referrals.\n"
+                "Lead: {lead}\n"
+                "Return JSON with keys: fit(1-100), why, next_action.\n"
+            )
+
+            enriched_rows=[]
+            for _, row in leads_df.head(top_n).iterrows():
+                lead_json = row.to_dict()
+                try:
+                    msg = model.invoke(prompt.format_messages(lead=json.dumps(lead_json)))
+                    txt = (msg.content or "").strip()
+                    data = {}
+                    try:
+                        data = json.loads(txt)
+                    except Exception:
+                        # attempt to extract JSON-like chunk
+                        start = txt.find("{"); end = txt.rfind("}")
+                        if start!=-1 and end!=-1:
+                            data = json.loads(txt[start:end+1])
+                    enriched_rows.append({
+                        "Name": row["Name"],
+                        "LC_Fit": data.get("fit", 50),
+                        "LC_Why": data.get("why",""),
+                        "LC_Next": data.get("next_action",""),
+                    })
+                except Exception as e:
+                    enriched_rows.append({"Name": row["Name"], "LC_Fit": 50, "LC_Why": f"error: {e}", "LC_Next": ""})
+
+            st.dataframe(pd.DataFrame(enriched_rows), use_container_width=True)
+        else:
+            st.info("Run **Lead Finder** first so we have leads to enrich.")
+
+    st.divider()
+
+    # ---------- LangGraph Orchestrator ----------
+    st.markdown("### LangGraph Orchestrator (tiny state machine for ‘what to do now’)")
+
+    if not use_langgraph:
+        st.info("Toggle **LangGraph Orchestrator** in the sidebar to enable.")
+    elif not (LG_OK and LCO_OK and OPENAI_API_KEY):
+        st.warning("LangGraph libraries or OPENAI_API_KEY missing.")
+    else:
+        trend_data = st.session_state.trend_data_cache
+        if not trend_data:
+            st.info("Fetch trends in **Trend Rider** first.")
+        else:
+            # Build a micro-graph: decide node -> (research or create) -> END
+            from typing import TypedDict
+
+            class S(TypedDict):
+                intent: str
+                brief: str
+
+            model = ChatOpenAI(model="gpt-4o-mini", temperature=0.2, api_key=OPENAI_API_KEY)
+
+            def decide(state: S) -> S:
+                rising = trend_data.get("google_trends", {}).get("rising", [])
+                hot = len([r for r in rising if r.get("value",0) >= 100]) >= 3
+                state["intent"] = "content" if hot else "research"
+                return state
+
+            def do_research(state: S) -> S:
+                msg = model.invoke(f"Summarize 5 bullet insights from:\n{json.dumps(trend_data)[:6000]}")
+                state["brief"] = (msg.content or "").strip()
+                return state
+
+            def do_content(state: S) -> S:
+                msg = model.invoke("Draft 3 short post ideas with hooks + CTAs for a local business based on these trends:\n"
+                                   + json.dumps(trend_data)[:6000])
+                state["brief"] = (msg.content or "").strip()
+                return state
+
+            g = StateGraph(S)
+            g.add_node("decide", decide)
+            g.add_node("research", do_research)
+            g.add_node("content", do_content)
+            g.set_entry_point("decide")
+            # edges
+            if LG_OK:
+                from langgraph.graph import START
+            # explicit routing after decide:
+            def router(state: S):
+                return state["intent"]
+            g.add_conditional_edges("decide", router, {"research":"research","content":"content"})
+            g.add_edge("research", END)
+            g.add_edge("content", END)
+            app = g.compile()
+
+            state = {"intent":"", "brief":""}
+            out = app.invoke(state)
+            st.info(f"Intent: **{out['intent']}**")
+            st.markdown(out["brief"])
+
+    st.divider()
+
+    # ---------- CrewAI Growth Crew ----------
+    st.markdown("### CrewAI Growth Crew (Researcher + Copywriter)")
+
+    if not use_crewai:
+        st.info("Toggle **CrewAI Growth Crew** in the sidebar to enable.")
+    elif not (CREW_OK and OPENAI_API_KEY):
+        st.warning("CrewAI not installed or OPENAI_API_KEY missing.")
+    else:
+        biz = st.text_input("Business", "Real Estate Agent", key="crew_biz")
+        niche = st.text_input("Niche focus", "Relocation in Katy, TX", key="crew_niche")
+        if st.button("Run Growth Crew", key="crew_run"):
+            researcher = Agent(
+                role="Market Researcher",
+                goal="Find insights & angles that will convert for a local SMB.",
+                backstory="You love concise facts and actionable takeaways.",
+                allow_delegation=False,
+                verbose=False,
+                llm=ChatOpenAI(model="gpt-4o-mini", temperature=0.1, api_key=OPENAI_API_KEY),
+            )
+            writer = Agent(
+                role="Copywriter",
+                goal="Write a crisp one-pager a business owner can use today.",
+                backstory="You are crisp, persuasive, and practical.",
+                allow_delegation=False,
+                verbose=False,
+                llm=ChatOpenAI(model="gpt-4o-mini", temperature=0.3, api_key=OPENAI_API_KEY),
+            )
+            t1 = Task(
+                description=f"Summarize 5 bullet insights for {biz} ({niche}). Provide sources if relevant.",
+                agent=researcher,
+            )
+            t2 = Task(
+                description="Write a 1-page brief with headline, 3 bullets, 1 CTA. Make it print-friendly.",
+                agent=writer,
+            )
+            crew = Crew(agents=[researcher, writer], tasks=[t1, t2])
+            try:
+                result = crew.kickoff()
+            except Exception as e:
+                result = f"(CrewAI runtime error: {e})"
+            st.markdown("#### One-pager")
+            st.markdown(str(result))
