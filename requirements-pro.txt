@@ -1,5 +1,5 @@
-# Optional Pro libraries (install only if you need them)
-langchain==0.2.16
+# Optional Pro libraries
+langchain==0.3.11
 langgraph==0.2.22
-langchain-openai==0.1.22
+langchain-openai==0.2.2
 crewai==0.51.0
