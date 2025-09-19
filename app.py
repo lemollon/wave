@@ -70,9 +70,8 @@ OPENAI_API_KEY = _env("OPENAI_API_KEY", "")
 # Safe client init for Streamlit + Render
 if OpenAI and OPENAI_API_KEY:
     try:
-        # v1 SDK reads key from env too, but explicit is fine
         client = OpenAI(api_key=OPENAI_API_KEY)
-    except Exception as _e:
+    except Exception:
         client = None
 else:
     client = None
@@ -351,11 +350,11 @@ with tab1:
             "- **YouTube** fresh videos for zeitgeist\n"
             "- An **AI market summary** and post ideas\n"
         )
+
     st.selectbox("Reddit ranking", ["hot", "top"], index=0, key="reddit_mode")
 
-    # FIXED: robust form submit pattern
-    trend_form = st.form(key="trend_form", clear_on_submit=False)
-    with trend_form:
+    # ✅ All inputs + submit inside the SAME form context
+    with st.form("trend_form", clear_on_submit=False):
         niche = st.text_input(
             "Niche keywords (comma-separated)",
             "real estate, mortgage, school districts",
@@ -374,15 +373,19 @@ with tab1:
             index=0,
             key="trend_timeframe",
         )
-        submitted = trend_form.form_submit_button("Fetch trends", key="trend_submit")
+        submitted = st.form_submit_button("Fetch trends", type="primary")
 
     if submitted:
         keywords = [s.strip() for s in niche.split(",") if s.strip()]
         sub_list = [s.strip() for s in subs.split(",") if s.strip()]
         data = gather_trends(
-            niche_keywords=keywords, city=city, state=state, subs=sub_list,
-            timeframe=timeframe, youtube_api_key=_env("YOUTUBE_API_KEY", ""),
-            reddit_mode=st.session_state.reddit_mode
+            niche_keywords=keywords,
+            city=city,
+            state=state,
+            subs=sub_list,
+            timeframe=timeframe,
+            youtube_api_key=_env("YOUTUBE_API_KEY", ""),
+            reddit_mode=st.session_state.reddit_mode,
         )
         st.session_state.trend_data_cache = data
 
@@ -442,14 +445,13 @@ with tab2:
             "- Typical targets for real estate: *apartment complex, movers, mortgage broker, home builder*.\n"
         )
 
-    # FIXED: robust form submit pattern
-    lead_form = st.form(key="lead_form", clear_on_submit=False)
-    with lead_form:
+    # ✅ All inputs + submit inside the SAME form context
+    with st.form("lead_form", clear_on_submit=False):
         cat = st.text_input("Place type / query", "apartment complex", key="lead_cat")
         city2 = st.text_input("City", "Katy", key="lead_city")
         state2 = st.text_input("State", "TX", key="lead_state")
         limit = st.slider("How many?", 5, 30, 12, key="lead_limit")
-        go = lead_form.form_submit_button("Search", key="lead_submit")
+        go = st.form_submit_button("Search", type="primary")
 
     def actionability_score(row, query: str):
         score, reasons = 0, []
