@@ -27,6 +27,7 @@ try:
 except Exception:
     MAPS_OK = False
 
+# OpenAI v1 SDK import
 try:
     from openai import OpenAI
 except Exception:
@@ -65,7 +66,16 @@ def _env(k: str, d: str = "") -> str:
     return os.getenv(k, d)
 
 OPENAI_API_KEY = _env("OPENAI_API_KEY", "")
-client = OpenAI(api_key=OPENAI_API_KEY) if (OPENAI_API_KEY and OpenAI) else None
+
+# Safe client init for Streamlit + Render
+if OpenAI and OPENAI_API_KEY:
+    try:
+        # v1 SDK reads key from env too, but explicit is fine
+        client = OpenAI(api_key=OPENAI_API_KEY)
+    except Exception as _e:
+        client = None
+else:
+    client = None
 
 
 def llm_ok() -> bool:
@@ -80,8 +90,10 @@ def llm(prompt: str, system: str = "You are a helpful marketer.", temp: float = 
         r = client.chat.completions.create(
             model="gpt-4o-mini",
             temperature=temp,
-            messages=[{"role": "system", "content": system},
-                      {"role": "user", "content": prompt}],
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt},
+            ],
         )
         return (r.choices[0].message.content or "").strip()
     except Exception as e:
@@ -341,16 +353,28 @@ with tab1:
         )
     st.selectbox("Reddit ranking", ["hot", "top"], index=0, key="reddit_mode")
 
-    with st.form("trend_form"):
-        niche = st.text_input("Niche keywords (comma-separated)",
-                              "real estate, mortgage, school districts", key="trend_niche")
+    # FIXED: robust form submit pattern
+    trend_form = st.form(key="trend_form", clear_on_submit=False)
+    with trend_form:
+        niche = st.text_input(
+            "Niche keywords (comma-separated)",
+            "real estate, mortgage, school districts",
+            key="trend_niche",
+        )
         city = st.text_input("City", "Katy", key="trend_city")
         state = st.text_input("State", "TX", key="trend_state")
-        subs = st.text_input("Reddit subs (comma-separated)",
-                             "RealEstate, Austin, personalfinance", key="trend_subs")
-        timeframe = st.selectbox("Google Trends timeframe",
-                                 ["now 7-d", "now 1-d", "now 30-d", "today 3-m"], index=0, key="trend_timeframe")
-        submitted = st.form_submit_button("Fetch trends", key="trend_submit")
+        subs = st.text_input(
+            "Reddit subs (comma-separated)",
+            "RealEstate, Austin, personalfinance",
+            key="trend_subs",
+        )
+        timeframe = st.selectbox(
+            "Google Trends timeframe",
+            ["now 7-d", "now 1-d", "now 30-d", "today 3-m"],
+            index=0,
+            key="trend_timeframe",
+        )
+        submitted = trend_form.form_submit_button("Fetch trends", key="trend_submit")
 
     if submitted:
         keywords = [s.strip() for s in niche.split(",") if s.strip()]
@@ -417,12 +441,15 @@ with tab2:
             "- We compute an **Actionability Score** and explain **why** each lead is hot.\n"
             "- Typical targets for real estate: *apartment complex, movers, mortgage broker, home builder*.\n"
         )
-    with st.form("lead_form"):
+
+    # FIXED: robust form submit pattern
+    lead_form = st.form(key="lead_form", clear_on_submit=False)
+    with lead_form:
         cat = st.text_input("Place type / query", "apartment complex", key="lead_cat")
         city2 = st.text_input("City", "Katy", key="lead_city")
         state2 = st.text_input("State", "TX", key="lead_state")
         limit = st.slider("How many?", 5, 30, 12, key="lead_limit")
-        go = st.form_submit_button("Search", key="lead_submit")
+        go = lead_form.form_submit_button("Search", key="lead_submit")
 
     def actionability_score(row, query: str):
         score, reasons = 0, []
@@ -473,7 +500,7 @@ with tab2:
         show_cols = ["Name", "Score", "Why", "Rating", "Reviews", "Phone", "Website", "Address"]
         st.dataframe(dff[show_cols], use_container_width=True)
 
-        # ------- FIXED selectbox + details panel ------
+        # Select + details panel
         if "Name" in dff.columns and len(dff) > 0:
             name_choice = st.selectbox("Select a business", list(dff["Name"].astype(str).unique()))
         else:
@@ -764,3 +791,7 @@ with tab5:
                 result = f"(CrewAI runtime error: {e})"
             st.markdown("#### One-pager")
             st.markdown(str(result))
+
+# If OPENAI_API_KEY is missing, show a gentle hint (does not stop the app)
+if client is None and "OPENAI_API_KEY" not in os.environ:
+    st.caption("Set OPENAI_API_KEY in Render → Settings → Environment to enable AI features.")
