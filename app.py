@@ -33,7 +33,7 @@ try:
 except Exception:
     OpenAI = None
 
-# Pro libs (optional)
+# Pro libs (optional) — import flags
 LC_OK = LG_OK = LCO_OK = False
 try:
     from langchain_core.prompts import ChatPromptTemplate
@@ -62,18 +62,37 @@ except Exception:
 
 
 # -------------------- ENV / helpers --------------------
+def _secrets_file_exists() -> bool:
+    """Return True only if a Streamlit secrets.toml actually exists on disk."""
+    paths = [
+        "/app/.streamlit/secrets.toml",
+        os.path.expanduser("~/.streamlit/secrets.toml"),
+        "/root/.streamlit/secrets.toml",
+    ]
+    for p in paths:
+        try:
+            if os.path.exists(p):
+                return True
+        except Exception:
+            pass
+    return False
+
+
 def _env(k: str, d: str = "") -> str:
     """
-    Look up a value from OS env; if absent, fall back to Streamlit secrets.
-    This lets the app work on Render (env vars) and Streamlit Cloud (secrets).
+    Look up a value from OS env; if absent, fall back to Streamlit secrets
+    ONLY if a secrets.toml file truly exists (prevents the red secrets banner).
     """
     v = os.getenv(k)
-    if not v:
+    if v:
+        return v
+    if _secrets_file_exists():
         try:
-            v = st.secrets.get(k, d)  # safe even if secrets isn't configured
+            return st.secrets.get(k, d)
         except Exception:
-            v = d
-    return v
+            return d
+    return d
+
 
 # Be generous in finding your key (but do NOT print it)
 OPENAI_API_KEY = (
@@ -88,7 +107,7 @@ OPENAI_API_KEY = (
 if OpenAI and OPENAI_API_KEY:
     try:
         client = OpenAI(api_key=OPENAI_API_KEY)
-    except Exception as _e:
+    except Exception:
         client = None
 else:
     client = None
@@ -159,6 +178,18 @@ def kpi(label: str, value: str):
     )
 
 
+def _safe_show_df(df: pd.DataFrame, preferred_cols: List[str], **kwargs):
+    """Render only columns that actually exist; avoid KeyError."""
+    if df is None or df.empty:
+        st.info("No data to display.")
+        return
+    cols = [c for c in preferred_cols if c in df.columns]
+    if not cols:
+        st.dataframe(df.head(20), **kwargs)
+    else:
+        st.dataframe(df[cols].head(20), **kwargs)
+
+
 # ------------- Warm-up button (Render/Cloud cold starts) -------------
 def warm_up_render(url: str, timeout: int = 10) -> str:
     if not url:
@@ -195,9 +226,9 @@ def google_trends_rising(keywords: List[str], geo="US", timeframe="now 7-d") -> 
                 for _, row in rising_df.iterrows():
                     rising_all.append({
                         "keyword": kw,
-                        "query": row["query"],
-                        "value": int(row.get("value", 0)),
-                        "link": f"https://www.google.com/search?q={row['query'].replace(' ', '+')}",
+                        "query": row.get("query"),
+                        "value": int(row.get("value", 0) or 0),
+                        "link": f"https://www.google.com/search?q={(row.get('query') or '').replace(' ', '+')}",
                     })
         except Exception as e:
             rising_all.append({"keyword": kw, "query": None, "value": 0, "error": str(e)})
@@ -225,10 +256,10 @@ def reddit_hot_or_top(subreddits: List[str], mode: str = "hot", limit: int = 15)
                 for p in it:
                     posts.append({
                         "subreddit": sub,
-                        "title": p.title,
-                        "score": int(p.score),
-                        "url": f"https://www.reddit.com{p.permalink}",
-                        "created_utc": int(p.created_utc)
+                        "title": getattr(p, "title", None),
+                        "score": int(getattr(p, "score", 0) or 0),
+                        "url": f"https://www.reddit.com{getattr(p, 'permalink', '')}",
+                        "created_utc": int(getattr(p, "created_utc", 0) or 0)
                     })
             except Exception as e:
                 posts.append({"subreddit": sub, "title": None, "score": 0, "error": str(e)})
@@ -249,12 +280,13 @@ def youtube_search(api_key: str, query: str, max_results: int = 10) -> Dict:
         r.raise_for_status()
         items = []
         for it in r.json().get("items", []):
-            sn = it.get("snippet", {})
+            sn = it.get("snippet", {}) or {}
+            vid = (it.get("id") or {}).get("videoId", "")
             items.append({
                 "title": sn.get("title"),
                 "channel": sn.get("channelTitle"),
                 "publishedAt": sn.get("publishedAt"),
-                "url": f"https://www.youtube.com/watch?v={it['id'].get('videoId')}"
+                "url": f"https://www.youtube.com/watch?v={vid}" if vid else "",
             })
         return {"source": "youtube", "items": items}
     except Exception as e:
@@ -302,7 +334,7 @@ def search_places_optional(query: str, city: str, state: str, limit: int = 12, a
     places = r.json().get("places", []) or []
     rows = []
     for p in places[:limit]:
-        name = (p.get("displayName") or {}).get("text") or p.get("name", "").split("/")[-1]
+        name = (p.get("displayName") or {}).get("text") or (p.get("name", "").split("/")[-1] if p.get("name") else "")
         locd = p.get("location") or {}
         rows.append({
             "Name": name,
@@ -338,7 +370,7 @@ if st.sidebar.button("🔥 Warm up the AI"):
     msg = warm_up_render(wake_url)
     (st.sidebar.success if msg.startswith("Warmed") else st.sidebar.warning)(msg)
 
-# ---- OPTION B: features forced ON; no toggles ----
+# Pro features forced ON (no toggles)
 use_langchain = True
 use_langgraph = True
 use_crewai   = True
@@ -409,31 +441,31 @@ with tab1:
     else:
         rising = pd.DataFrame(data.get("google_trends", {}).get("rising", []))
         st.markdown("### Google Trends — Rising Queries")
-        if not rising.empty:
-            st.dataframe(rising[["keyword", "query", "value", "link"]], use_container_width=True)
-        else:
+        if rising.empty:
             st.info("No rising queries or pytrends missing.")
+        else:
+            _safe_show_df(rising, ["keyword", "query", "value", "link"], use_container_width=True)
 
         st.markdown("### Reddit — Hot Posts")
         rd = data.get("reddit", {})
         if rd.get("error"):
             st.warning(f"Reddit: {rd['error']}")
         posts = pd.DataFrame(rd.get("posts", []))
-        if not posts.empty:
-            st.dataframe(posts[["subreddit", "title", "score", "url"]].head(20), use_container_width=True)
-        else:
+        if posts.empty:
             st.info("No Reddit posts found or credentials missing.")
+        else:
+            _safe_show_df(posts, ["subreddit", "title", "score", "url"], use_container_width=True)
 
         st.markdown("### YouTube — Fresh Videos (optional)")
         yt = data.get("youtube", {})
         vids = pd.DataFrame(yt.get("items", []))
-        if not vids.empty:
-            st.dataframe(vids[["title", "channel", "publishedAt", "url"]], use_container_width=True)
-        else:
+        if vids.empty:
             if yt.get("error"):
                 st.caption(f"YouTube: {yt['error']}")
             else:
                 st.caption("Add YOUTUBE_API_KEY to show videos.")
+        else:
+            _safe_show_df(vids, ["title", "channel", "publishedAt", "url"], use_container_width=True)
 
         st.markdown("### AI Market Summary")
         sample = {
@@ -511,11 +543,10 @@ with tab2:
         with c2: kpi("Avg rating", f"{scored['Rating'].mean():.2f}" if len(scored) else "–")
         with c3: kpi("Median reviews", f"{int(scored['Reviews'].median())}" if len(scored) else "–")
 
-        # table
         dff = scored.reset_index(drop=True).copy()
         st.markdown("#### Ranked leads")
         show_cols = ["Name", "Score", "Why", "Rating", "Reviews", "Phone", "Website", "Address"]
-        st.dataframe(dff[show_cols], use_container_width=True)
+        _safe_show_df(dff, show_cols, use_container_width=True)
 
         # Select + details panel
         if "Name" in dff.columns and len(dff) > 0:
@@ -696,7 +727,7 @@ with tab5:
 
     # LangChain Enricher
     st.markdown("### LangChain Enricher")
-    if not (LC_OK and LCO_OK and OPENAI_API_KEY):
+    if not (LC_OK and LCO_OK and OPENAI_API_KEY and use_langchain):
         st.warning("LangChain libraries or OPENAI_API_KEY missing.")
     else:
         leads_df = st.session_state.lead_data_cache
@@ -720,13 +751,13 @@ with tab5:
                         if start != -1 and end != -1:
                             data = json.loads(txt[start:end+1])
                     enriched_rows.append({
-                        "Name": row["Name"],
+                        "Name": row.get("Name"),
                         "LC_Fit": data.get("fit", 50),
                         "LC_Why": data.get("why", ""),
                         "LC_Next": data.get("next_action", ""),
                     })
                 except Exception as e:
-                    enriched_rows.append({"Name": row["Name"], "LC_Fit": 50, "LC_Why": f"error: {e}", "LC_Next": ""})
+                    enriched_rows.append({"Name": row.get("Name"), "LC_Fit": 50, "LC_Why": f"error: {e}", "LC_Next": ""})
             st.dataframe(pd.DataFrame(enriched_rows), use_container_width=True)
         else:
             st.info("Run **Lead Finder** first so we have leads to enrich.")
@@ -735,7 +766,7 @@ with tab5:
 
     # LangGraph Orchestrator
     st.markdown("### LangGraph Orchestrator")
-    if not (LG_OK and LCO_OK and OPENAI_API_KEY):
+    if not (LG_OK and LCO_OK and OPENAI_API_KEY and use_langgraph):
         st.warning("LangGraph libraries or OPENAI_API_KEY missing.")
     else:
         trend_data = st.session_state.trend_data_cache
@@ -749,7 +780,7 @@ with tab5:
             model = ChatOpenAI(model="gpt-4o-mini", temperature=0.2, api_key=OPENAI_API_KEY)
             def decide(state: S) -> S:
                 rising = trend_data.get("google_trends", {}).get("rising", [])
-                hot = len([r for r in rising if r.get("value", 0) >= 100]) >= 3
+                hot = len([r for r in rising if (r or {}).get("value", 0) >= 100]) >= 3
                 state["intent"] = "content" if hot else "research"
                 return state
             def do_research(state: S) -> S:
@@ -780,7 +811,7 @@ with tab5:
 
     # CrewAI Growth Crew
     st.markdown("### CrewAI Growth Crew")
-    if not (CREW_OK and OPENAI_API_KEY):
+    if not (CREW_OK and OPENAI_API_KEY and use_crewai):
         st.warning("CrewAI not installed or OPENAI_API_KEY missing.")
     else:
         biz = st.text_input("Business", "Real Estate Agent", key="crew_biz")
@@ -814,4 +845,4 @@ with tab5:
 
 # If OPENAI_API_KEY is missing, show a gentle hint (does not stop the app)
 if client is None and not OPENAI_API_KEY:
-    st.caption("Set OPENAI_API_KEY in your environment or Streamlit secrets to enable AI features.")
+    st.caption("Set OPENAI_API_KEY in your environment to enable AI features.")
