@@ -773,39 +773,67 @@ with tab5:
         if not trend_data:
             st.info("Fetch trends in **Trend Rider** first.")
         else:
-            from typing import TypedDict
-            class S(TypedDict):
-                intent: str
-                brief: str
             model = ChatOpenAI(model="gpt-4o-mini", temperature=0.2, api_key=OPENAI_API_KEY)
-            def decide(state: S) -> S:
+
+            # Robust graph: use plain dict schema to avoid TypedDict JSON issues.
+            try:
+                g = StateGraph(dict)
+
+                def decide(state: dict) -> dict:
+                    rising = trend_data.get("google_trends", {}).get("rising", [])
+                    hot = len([r for r in rising if (r or {}).get("value", 0) >= 100]) >= 3
+                    state["intent"] = "content" if hot else "research"
+                    return state
+
+                def do_research(state: dict) -> dict:
+                    msg = model.invoke(f"Summarize 5 bullet insights from:\n{json.dumps(trend_data)[:6000]}")
+                    state["brief"] = (msg.content or "").strip()
+                    return state
+
+                def do_content(state: dict) -> dict:
+                    msg = model.invoke(
+                        "Draft 3 short post ideas with hooks + CTAs for a local business based on these trends:\n"
+                        + json.dumps(trend_data)[:6000]
+                    )
+                    state["brief"] = (msg.content or "").strip()
+                    return state
+
+                g.add_node("decide", decide)
+                g.add_node("research", do_research)
+                g.add_node("content", do_content)
+                g.set_entry_point("decide")
+
+                def router(state: dict):
+                    return state.get("intent", "research")
+
+                g.add_conditional_edges("decide", router, {"research": "research", "content": "content"})
+                g.add_edge("research", END)
+                g.add_edge("content", END)
+
+                app = g.compile()
+                out = app.invoke({"intent": "", "brief": ""})
+                st.info(f"Intent: **{out.get('intent','?')}**")
+                st.markdown(out.get("brief", "(no output)"))
+
+            except Exception as e:
+                # Clean fallback if any LangGraph runtime error occurs
                 rising = trend_data.get("google_trends", {}).get("rising", [])
                 hot = len([r for r in rising if (r or {}).get("value", 0) >= 100]) >= 3
-                state["intent"] = "content" if hot else "research"
-                return state
-            def do_research(state: S) -> S:
-                msg = model.invoke(f"Summarize 5 bullet insights from:\n{json.dumps(trend_data)[:6000]}")
-                state["brief"] = (msg.content or "").strip()
-                return state
-            def do_content(state: S) -> S:
-                msg = model.invoke("Draft 3 short post ideas with hooks + CTAs for a local business based on these trends:\n"
-                                   + json.dumps(trend_data)[:6000])
-                state["brief"] = (msg.content or "").strip()
-                return state
-            g = StateGraph(S)
-            g.add_node("decide", decide)
-            g.add_node("research", do_research)
-            g.add_node("content", do_content)
-            g.set_entry_point("decide")
-            def router(state: S):
-                return state["intent"]
-            g.add_conditional_edges("decide", router, {"research": "research", "content": "content"})
-            g.add_edge("research", END)
-            g.add_edge("content", END)
-            app = g.compile()
-            out = app.invoke({"intent": "", "brief": ""})
-            st.info(f"Intent: **{out['intent']}**")
-            st.markdown(out["brief"])
+                intent = "content" if hot else "research"
+                if intent == "research":
+                    brief = llm(
+                        f"Summarize 5 bullet insights from:\n{json.dumps(trend_data)[:6000]}",
+                        system="You are a concise SMB strategist.",
+                    ) or "(LLM unavailable)"
+                else:
+                    brief = llm(
+                        "Draft 3 short post ideas with hooks + CTAs for a local business based on these trends:\n"
+                        + json.dumps(trend_data)[:6000],
+                        system="You write punchy social content.",
+                    ) or "(LLM unavailable)"
+                st.warning(f"LangGraph fallback used due to runtime error: {e}")
+                st.info(f"Intent: **{intent}**")
+                st.markdown(brief)
 
     st.divider()
 
