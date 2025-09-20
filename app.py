@@ -63,15 +63,26 @@ except Exception:
 
 # -------------------- ENV / helpers --------------------
 def _env(k: str, d: str = "") -> str:
-    return os.getenv(k, d)
+    """
+    Look up a value from OS env; if absent, fall back to Streamlit secrets.
+    This lets the app work on Render (env vars) and Streamlit Cloud (secrets).
+    """
+    v = os.getenv(k)
+    if not v:
+        try:
+            v = st.secrets.get(k, d)  # safe even if secrets isn't configured
+        except Exception:
+            v = d
+    return v
 
 OPENAI_API_KEY = _env("OPENAI_API_KEY", "")
 
 # Safe client init for Streamlit + Render
 if OpenAI and OPENAI_API_KEY:
     try:
+        # v1 SDK reads key from env too, but explicit is fine
         client = OpenAI(api_key=OPENAI_API_KEY)
-    except Exception:
+    except Exception as _e:
         client = None
 else:
     client = None
@@ -316,7 +327,7 @@ if theme == "Light":
     st.markdown("<style>body{background:#f6f7fb;color:#111}</style>", unsafe_allow_html=True)
 
 st.sidebar.markdown("### Keep service awake")
-wake_url = os.getenv("RENDER_WAKE_URL", "")
+wake_url = _env("RENDER_WAKE_URL", "")
 if st.sidebar.button("🔥 Warm up the AI"):
     msg = warm_up_render(wake_url)
     (st.sidebar.success if msg.startswith("Warmed") else st.sidebar.warning)(msg)
@@ -350,11 +361,11 @@ with tab1:
             "- **YouTube** fresh videos for zeitgeist\n"
             "- An **AI market summary** and post ideas\n"
         )
-
     st.selectbox("Reddit ranking", ["hot", "top"], index=0, key="reddit_mode")
 
-    # ✅ All inputs + submit inside the SAME form context
-    with st.form("trend_form", clear_on_submit=False):
+    # Form with proper submit button
+    trend_form = st.form(key="trend_form", clear_on_submit=False)
+    with trend_form:
         niche = st.text_input(
             "Niche keywords (comma-separated)",
             "real estate, mortgage, school districts",
@@ -373,19 +384,15 @@ with tab1:
             index=0,
             key="trend_timeframe",
         )
-        submitted = st.form_submit_button("Fetch trends", type="primary")
+        submitted = trend_form.form_submit_button("Fetch trends", key="trend_submit")
 
     if submitted:
         keywords = [s.strip() for s in niche.split(",") if s.strip()]
         sub_list = [s.strip() for s in subs.split(",") if s.strip()]
         data = gather_trends(
-            niche_keywords=keywords,
-            city=city,
-            state=state,
-            subs=sub_list,
-            timeframe=timeframe,
-            youtube_api_key=_env("YOUTUBE_API_KEY", ""),
-            reddit_mode=st.session_state.reddit_mode,
+            niche_keywords=keywords, city=city, state=state, subs=sub_list,
+            timeframe=timeframe, youtube_api_key=_env("YOUTUBE_API_KEY", ""),
+            reddit_mode=st.session_state.reddit_mode
         )
         st.session_state.trend_data_cache = data
 
@@ -445,13 +452,14 @@ with tab2:
             "- Typical targets for real estate: *apartment complex, movers, mortgage broker, home builder*.\n"
         )
 
-    # ✅ All inputs + submit inside the SAME form context
-    with st.form("lead_form", clear_on_submit=False):
+    # Form with submit
+    lead_form = st.form(key="lead_form", clear_on_submit=False)
+    with lead_form:
         cat = st.text_input("Place type / query", "apartment complex", key="lead_cat")
         city2 = st.text_input("City", "Katy", key="lead_city")
         state2 = st.text_input("State", "TX", key="lead_state")
         limit = st.slider("How many?", 5, 30, 12, key="lead_limit")
-        go = st.form_submit_button("Search", type="primary")
+        go = lead_form.form_submit_button("Search", key="lead_submit")
 
     def actionability_score(row, query: str):
         score, reasons = 0, []
@@ -795,5 +803,5 @@ with tab5:
             st.markdown(str(result))
 
 # If OPENAI_API_KEY is missing, show a gentle hint (does not stop the app)
-if client is None and "OPENAI_API_KEY" not in os.environ:
-    st.caption("Set OPENAI_API_KEY in Render → Settings → Environment to enable AI features.")
+if client is None and not _env("OPENAI_API_KEY", ""):
+    st.caption("Set OPENAI_API_KEY in your environment or Streamlit secrets to enable AI features.")
