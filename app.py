@@ -94,6 +94,18 @@ def _env(k: str, d: str = "") -> str:
     return d
 
 
+def to_json(obj) -> str:
+    """Safe JSON that turns pandas/numpy/Datetime objects into strings."""
+    def _default(o):
+        try:
+            if hasattr(o, "isoformat"):
+                return o.isoformat()
+        except Exception:
+            pass
+        return str(o)
+    return json.dumps(obj, default=_default)
+
+
 # Be generous in finding your key (but do NOT print it)
 OPENAI_API_KEY = (
     _env("OPENAI_API_KEY")
@@ -235,16 +247,45 @@ def google_trends_rising(keywords: List[str], geo="US", timeframe="now 7-d") -> 
     return {"source": "google_trends", "rising": rising_all, "iot": iot_map}
 
 
+# -------- Reddit with fallback (no keys required) --------
+def _reddit_fallback_scrape(subreddits: List[str], mode: str = "hot", limit: int = 15) -> Dict:
+    """Fetch basic posts via Reddit's public JSON if PRAW/keys fail."""
+    posts = []
+    mode = "top" if mode == "top" else "hot"
+    headers = {"User-Agent": "wavepilot/1.0 (+https://example.com)"}
+    for sub in (subreddits or [])[:6]:
+        try:
+            url = f"https://www.reddit.com/r/{sub}/{mode}.json?limit={min(limit, 25)}"
+            r = requests.get(url, headers=headers, timeout=15)
+            r.raise_for_status()
+            data = r.json()
+            children = (data.get("data") or {}).get("children", [])
+            for ch in children:
+                d = (ch.get("data") or {})
+                posts.append({
+                    "subreddit": sub,
+                    "title": d.get("title"),
+                    "score": int(d.get("score", 0) or 0),
+                    "url": "https://www.reddit.com" + (d.get("permalink") or ""),
+                })
+        except Exception as e:
+            posts.append({"subreddit": sub, "title": None, "score": 0, "error": f"fallback: {e}"})
+    posts = sorted(posts, key=lambda x: x.get("score", 0), reverse=True)
+    return {"source": "reddit_fallback", "posts": posts}
+
+
 def reddit_hot_or_top(subreddits: List[str], mode: str = "hot", limit: int = 15) -> Dict:
     try:
         import praw
     except Exception:
-        return {"source": "reddit", "error": "praw not installed", "posts": []}
+        # No PRAW? go straight to fallback
+        return _reddit_fallback_scrape(subreddits, mode=mode, limit=limit)
     cid = _env("REDDIT_CLIENT_ID")
     csec = _env("REDDIT_CLIENT_SECRET")
     ua = _env("REDDIT_USER_AGENT", "wavepilot/1.0 by <user>")
+    # If keys are missing, use fallback
     if not (cid and csec and ua):
-        return {"source": "reddit", "error": "Missing Reddit API keys (CLIENT_ID/SECRET/USER_AGENT).", "posts": []}
+        return _reddit_fallback_scrape(subreddits, mode=mode, limit=limit)
     try:
         reddit = praw.Reddit(client_id=cid, client_secret=csec, user_agent=ua, check_for_async=False)
         reddit.read_only = True
@@ -264,9 +305,12 @@ def reddit_hot_or_top(subreddits: List[str], mode: str = "hot", limit: int = 15)
             except Exception as e:
                 posts.append({"subreddit": sub, "title": None, "score": 0, "error": str(e)})
         posts = sorted(posts, key=lambda x: x.get("score", 0), reverse=True)
+        # If we got nothing useful, use fallback
+        if len([p for p in posts if p.get("title")]) == 0:
+            return _reddit_fallback_scrape(subreddits, mode=mode, limit=limit)
         return {"source": "reddit", "posts": posts}
-    except Exception as e:
-        return {"source": "reddit", "error": str(e), "posts": []}
+    except Exception:
+        return _reddit_fallback_scrape(subreddits, mode=mode, limit=limit)
 
 
 def youtube_search(api_key: str, query: str, max_results: int = 10) -> Dict:
@@ -475,7 +519,7 @@ with tab1:
         summary = llm(
             system="You are a concise SMB strategist.",
             prompt=(f"Summarize ~5 bullets of what's trending for {city}, {state} in niche {niche}. "
-                    f"Then propose 3 ride-the-wave post ideas. Data:\n{json.dumps(sample)}")
+                    f"Then propose 3 ride-the-wave post ideas. Data:\n{to_json(sample)}")
         ) or "Add OPENAI_API_KEY to enable AI-written summaries."
         st.info(summary)
 
@@ -654,7 +698,7 @@ with tab3:
         prompt = (
             f"Polish this outreach for a {persona} to contact {target}. "
             f"Keep SAME dates and channels. Tone: {tone}. Return PLAIN TEXT (not JSON). "
-            f"Here are the steps as JSON for reference:\n{json.dumps(base)}"
+            f"Here are the steps as JSON for reference:\n{to_json(base)}"
         )
         polished = llm(prompt, system="You write high-converting SMB outreach.") or \
                    "\n".join([f"{s['send_dt']} • {s['channel']}: {s['subject']} {s['body']}".strip() for s in base])
@@ -741,7 +785,7 @@ with tab5:
             for _, row in leads_df.head(top_n).iterrows():
                 lead_json = row.to_dict()
                 try:
-                    msg = model.invoke(prompt.format_messages(lead=json.dumps(lead_json)))
+                    msg = model.invoke(prompt.format_messages(lead=to_json(lead_json)))
                     txt = (msg.content or "").strip()
                     data = {}
                     try:
@@ -786,14 +830,14 @@ with tab5:
                     return state
 
                 def do_research(state: dict) -> dict:
-                    msg = model.invoke(f"Summarize 5 bullet insights from:\n{json.dumps(trend_data)[:6000]}")
+                    msg = model.invoke(f"Summarize 5 bullet insights from:\n{to_json(trend_data)[:6000]}")
                     state["brief"] = (msg.content or "").strip()
                     return state
 
                 def do_content(state: dict) -> dict:
                     msg = model.invoke(
                         "Draft 3 short post ideas with hooks + CTAs for a local business based on these trends:\n"
-                        + json.dumps(trend_data)[:6000]
+                        + to_json(trend_data)[:6000]
                     )
                     state["brief"] = (msg.content or "").strip()
                     return state
@@ -822,13 +866,13 @@ with tab5:
                 intent = "content" if hot else "research"
                 if intent == "research":
                     brief = llm(
-                        f"Summarize 5 bullet insights from:\n{json.dumps(trend_data)[:6000]}",
+                        f"Summarize 5 bullet insights from:\n{to_json(trend_data)[:6000]}",
                         system="You are a concise SMB strategist.",
                     ) or "(LLM unavailable)"
                 else:
                     brief = llm(
                         "Draft 3 short post ideas with hooks + CTAs for a local business based on these trends:\n"
-                        + json.dumps(trend_data)[:6000],
+                        + to_json(trend_data)[:6000],
                         system="You write punchy social content.",
                     ) or "(LLM unavailable)"
                 st.warning(f"LangGraph fallback used due to runtime error: {e}")
