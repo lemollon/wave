@@ -384,7 +384,8 @@ with tab1:
             index=0,
             key="trend_timeframe",
         )
-        submitted = trend_form.form_submit_button("Fetch trends", key="trend_submit")
+        # FIX: remove unsupported key= on form_submit_button
+        submitted = trend_form.form_submit_button("Fetch trends")
 
     if submitted:
         keywords = [s.strip() for s in niche.split(",") if s.strip()]
@@ -459,7 +460,8 @@ with tab2:
         city2 = st.text_input("City", "Katy", key="lead_city")
         state2 = st.text_input("State", "TX", key="lead_state")
         limit = st.slider("How many?", 5, 30, 12, key="lead_limit")
-        go = lead_form.form_submit_button("Search", key="lead_submit")
+        # FIX: remove unsupported key= on form_submit_button
+        go = lead_form.form_submit_button("Search")
 
     def actionability_score(row, query: str):
         score, reasons = 0, []
