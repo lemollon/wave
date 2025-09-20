@@ -75,12 +75,18 @@ def _env(k: str, d: str = "") -> str:
             v = d
     return v
 
-OPENAI_API_KEY = _env("OPENAI_API_KEY", "")
+# Be generous in finding your key (but do NOT print it)
+OPENAI_API_KEY = (
+    _env("OPENAI_API_KEY")
+    or _env("OPENAI_API_TOKEN")
+    or _env("OPENAI")
+    or _env("OPENAI_SECRET")
+    or ""
+)
 
 # Safe client init for Streamlit + Render
 if OpenAI and OPENAI_API_KEY:
     try:
-        # v1 SDK reads key from env too, but explicit is fine
         client = OpenAI(api_key=OPENAI_API_KEY)
     except Exception as _e:
         client = None
@@ -320,7 +326,7 @@ def search_places_optional(query: str, city: str, state: str, limit: int = 12, a
 st.set_page_config(page_title="WavePilot — AI Growth Team (Pro)", page_icon="🌊", layout="wide")
 inject_css()
 
-# Sidebar: theme + Warm-up + Pro toggles
+# Sidebar: theme + Warm-up + Pro (always on)
 st.sidebar.markdown("### Appearance")
 theme = st.sidebar.radio("Theme", ["Dark", "Light"], index=0)
 if theme == "Light":
@@ -332,10 +338,11 @@ if st.sidebar.button("🔥 Warm up the AI"):
     msg = warm_up_render(wake_url)
     (st.sidebar.success if msg.startswith("Warmed") else st.sidebar.warning)(msg)
 
-st.sidebar.markdown("### Pro toggles (optional)")
-use_langchain = st.sidebar.toggle("LangChain Enricher", value=False)
-use_langgraph = st.sidebar.toggle("LangGraph Orchestrator", value=False)
-use_crewai = st.sidebar.toggle("CrewAI Growth Crew", value=False)
+# ---- OPTION B: features forced ON; no toggles ----
+use_langchain = True
+use_langgraph = True
+use_crewai   = True
+st.sidebar.markdown("### Pro (always on)")
 autogpt_url = st.sidebar.text_input("AutoGPT Webhook URL (optional)", _env("AUTOGPT_URL", ""))
 
 # Session vars
@@ -345,7 +352,7 @@ st.session_state.setdefault("reddit_mode", "hot")
 st.session_state.setdefault("out_persona", "Local Professional")
 
 st.title("🌊 WavePilot — AI Growth Team (Pro)")
-st.caption("Trends → Leads → Outreach (+ optional LangChain, LangGraph, CrewAI).")
+st.caption("Trends → Leads → Outreach (+ LangChain, LangGraph, CrewAI).")
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(
     ["Trend Rider", "Lead Finder", "Outreach Factory", "Weekly Report", "Pro Lab"]
@@ -356,14 +363,14 @@ with tab1:
     st.subheader("Trend Rider — ride what's hot")
     with st.expander("What this does", expanded=True):
         st.markdown(
-            "- **Google Trends (New)** rising queries around your niche\n"
+            "- **Google Trends** rising queries around your niche\n"
             "- **Reddit** hot/top threads for topic hooks\n"
             "- **YouTube** fresh videos for zeitgeist\n"
             "- An **AI market summary** and post ideas\n"
         )
     st.selectbox("Reddit ranking", ["hot", "top"], index=0, key="reddit_mode")
 
-    # Form with proper submit button
+    # Form with proper submit button (no key=)
     trend_form = st.form(key="trend_form", clear_on_submit=False)
     with trend_form:
         niche = st.text_input(
@@ -384,7 +391,6 @@ with tab1:
             index=0,
             key="trend_timeframe",
         )
-        # FIX: remove unsupported key= on form_submit_button
         submitted = trend_form.form_submit_button("Fetch trends")
 
     if submitted:
@@ -453,14 +459,13 @@ with tab2:
             "- Typical targets for real estate: *apartment complex, movers, mortgage broker, home builder*.\n"
         )
 
-    # Form with submit
+    # Form with submit (no key=)
     lead_form = st.form(key="lead_form", clear_on_submit=False)
     with lead_form:
         cat = st.text_input("Place type / query", "apartment complex", key="lead_cat")
         city2 = st.text_input("City", "Katy", key="lead_city")
         state2 = st.text_input("State", "TX", key="lead_state")
         limit = st.slider("How many?", 5, 30, 12, key="lead_limit")
-        # FIX: remove unsupported key= on form_submit_button
         go = lead_form.form_submit_button("Search")
 
     def actionability_score(row, query: str):
@@ -678,13 +683,20 @@ with tab4:
 # ===================== PRO LAB (stubs) =====================
 with tab5:
     st.subheader("Pro Lab — LangChain · LangGraph · CrewAI (optional)")
-    st.caption("These automate deeper research/polish. The app runs fine without them.")
+
+    # --- Diagnostics: see exactly what's missing ---
+    with st.expander("Pro diagnostics", expanded=False):
+        st.write({
+            "LangChain core (LC_OK)": LC_OK,
+            "LangChain OpenAI (LCO_OK)": LCO_OK,
+            "LangGraph (LG_OK)": LG_OK,
+            "CrewAI (CREW_OK)": CREW_OK,
+            "OPENAI_API_KEY present": bool(OPENAI_API_KEY),
+        })
 
     # LangChain Enricher
     st.markdown("### LangChain Enricher")
-    if not use_langchain:
-        st.info("Toggle **LangChain Enricher** in the sidebar to enable.")
-    elif not (LC_OK and LCO_OK and OPENAI_API_KEY):
+    if not (LC_OK and LCO_OK and OPENAI_API_KEY):
         st.warning("LangChain libraries or OPENAI_API_KEY missing.")
     else:
         leads_df = st.session_state.lead_data_cache
@@ -723,9 +735,7 @@ with tab5:
 
     # LangGraph Orchestrator
     st.markdown("### LangGraph Orchestrator")
-    if not use_langgraph:
-        st.info("Toggle **LangGraph Orchestrator** in the sidebar to enable.")
-    elif not (LG_OK and LCO_OK and OPENAI_API_KEY):
+    if not (LG_OK and LCO_OK and OPENAI_API_KEY):
         st.warning("LangGraph libraries or OPENAI_API_KEY missing.")
     else:
         trend_data = st.session_state.trend_data_cache
@@ -770,9 +780,7 @@ with tab5:
 
     # CrewAI Growth Crew
     st.markdown("### CrewAI Growth Crew")
-    if not use_crewai:
-        st.info("Toggle **CrewAI Growth Crew** in the sidebar to enable.")
-    elif not (CREW_OK and OPENAI_API_KEY):
+    if not (CREW_OK and OPENAI_API_KEY):
         st.warning("CrewAI not installed or OPENAI_API_KEY missing.")
     else:
         biz = st.text_input("Business", "Real Estate Agent", key="crew_biz")
@@ -805,5 +813,5 @@ with tab5:
             st.markdown(str(result))
 
 # If OPENAI_API_KEY is missing, show a gentle hint (does not stop the app)
-if client is None and not _env("OPENAI_API_KEY", ""):
+if client is None and not OPENAI_API_KEY:
     st.caption("Set OPENAI_API_KEY in your environment or Streamlit secrets to enable AI features.")
