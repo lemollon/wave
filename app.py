@@ -1,9 +1,9 @@
-# app.py — Wave — Trends → Leads → Outreach → Weekly Report + (Pro always ON)
-# Fixes:
-# - Chips now update widget values via _set_and_rerun() to avoid StreamlitAPIException.
-# - extract_strings() is stricter to filter partial tokens/junk.
-# - Pro features are always ON (no sidebar toggles).
-# - Each st.form(...) has exactly one st.form_submit_button().
+# app.py — Wave — Trends → Leads → Outreach → Weekly Report (Pro always ON)
+# Key fixes:
+# - Suggest buttons + chips are rendered BEFORE the form; chip clicks update session_state and rerun safely.
+# - extract_strings() sanitizes LLM output (no partial tokens).
+# - Pro features always ON, no toggles.
+# - Each st.form has exactly one st.form_submit_button().
 
 import os
 import io
@@ -86,7 +86,7 @@ def _env(k: str, d: str = "") -> str:
 
 OPENAI_API_KEY = _env("OPENAI_API_KEY", "")
 
-# Safe client init for Streamlit + Render
+# Safe client init
 if OpenAI and OPENAI_API_KEY:
     try:
         client = OpenAI(api_key=OPENAI_API_KEY)
@@ -101,17 +101,14 @@ def llm_ok() -> bool:
 
 
 def llm(prompt: str, system: str = "You are a helpful marketer.", temp: float = 0.4) -> str:
-    """Small wrapper around OpenAI chat; returns '' if not configured."""
     if not llm_ok():
         return ""
     try:
         r = client.chat.completions.create(
             model="gpt-4o-mini",
             temperature=temp,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": prompt},
-            ],
+            messages=[{"role": "system", "content": system},
+                      {"role": "user", "content": prompt}],
         )
         return (r.choices[0].message.content or "").strip()
     except Exception as e:
@@ -144,11 +141,9 @@ def inject_css():
           .stAlert { border-radius:12px; }
           .stButton>button { border-radius:10px; padding:.5rem .9rem; font-weight:600 }
           .helper-banner {
-            border:1px dashed #2b2f36; border-radius:10px; padding:.6rem .8rem; font-size:.9rem; margin: .5rem 0 1rem 0;
+            border:1px dashed #2b2f36; border-radius:10px; padding:.6rem .8rem; font-size:.9rem; margin:.5rem 0 1rem 0;
             background:rgba(255,255,255,0.02);
           }
-          /* Optional: nicer tiny tags inside tables */
-          .tag { display:inline-block; padding:.2rem .5rem; border-radius:999px; border:1px solid #2b2f36; margin-right:.3rem; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -179,29 +174,15 @@ def helper_banner():
     )
 
 
-# ---------- Rerun-safe widget update ----------
-def _set_and_rerun(widget_key: str, value: str):
-    """Safely update a widget's session_state value after it exists, then rerun."""
-    st.session_state[widget_key] = value
-    st.rerun()
-
-
 # ---------- LLM suggestion sanitation ----------
 _JSON_FENCE_RE = re.compile(r"^```+|```+$", flags=re.MULTILINE)
 _QUOTES_RE = re.compile(r"(^[\"'`\\s]+|[\"'`\\s]+$)")
-_ALLOWED_CHARS_RE = re.compile(r"[^0-9a-zA-Z&+’'()., /\\-]")  # allow words, spaces, basic punct
+_ALLOWED_CHARS_RE = re.compile(r"[^0-9a-zA-Z&+’'()., /\\-]")  # allow words, spaces, simple punct
 
 def extract_strings(raw: Any, max_items: int = 24) -> List[str]:
-    """
-    Robustly parse LLM output into a clean list of strings.
-    - Accept JSON arrays/objects or delimited text.
-    - Strip code fences, quotes, 'json:' headers.
-    - Drop very short or partial tokens (length < 3) and junk words.
-    - Normalize spaces and punctuation, dedupe, cap at max_items.
-    """
+    """Parse LLM output into clean strings. Removes code fences, 'json:' headers, quotes, weird chars, and partials."""
     if raw is None:
         return []
-
     candidates: List[str] = []
     if isinstance(raw, (list, tuple)):
         candidates = list(raw)
@@ -219,75 +200,24 @@ def extract_strings(raw: Any, max_items: int = 24) -> List[str]:
             else:
                 candidates = [txt]
         except Exception:
-            inner = txt
-            if inner.startswith("[") and inner.endswith("]"):
-                inner = inner[1:-1]
-            parts = re.split(r"[,\n;]", inner)
-            candidates = parts
+            inner = txt[1:-1] if txt.startswith("[") and txt.endswith("]") else txt
+            candidates = re.split(r"[,\n;]", inner)
 
-    cleaned: List[str] = []
-    seen = set()
+    cleaned, seen = [], set()
     for c in candidates:
         s = str(c).strip()
         s = _QUOTES_RE.sub("", s)
-        s = _ALLOWED_CHARS_RE.sub("", s)     # remove weird chars
-        s = re.sub(r"\s{2,}", " ", s)        # collapse whitespace
-        s = s.strip("[](){}\"'` ").strip()
-        if not s or len(s) < 3:
-            continue
-        if s.lower() in {"json", "array", "list", "none", "null"}:
+        s = _ALLOWED_CHARS_RE.sub("", s)
+        s = re.sub(r"\s{2,}", " ", s).strip("[](){}\"'` ").strip()
+        if not s or len(s) < 3 or s.lower() in {"json", "array", "list", "none", "null"}:
             continue
         if s not in seen:
             seen.add(s)
             cleaned.append(s)
-
     return cleaned[:max_items]
 
 
-def render_chips_and_capture(label: str, suggestions: List[str], key_prefix: str,
-                             state_list_name: str, text_input_key: str):
-    """
-    Clickable chips that append to a maintained list and mirror into a text input.
-    Uses _set_and_rerun(...) to safely update an already-instantiated widget key.
-    """
-    if not suggestions:
-        return
-
-    st.session_state.setdefault(state_list_name, [])
-    st.session_state.setdefault(text_input_key, st.session_state.get(text_input_key, ""))
-
-    st.markdown(f"**{label}**")
-    cols = st.columns(min(4, max(1, len(suggestions)//6 + 1)))
-
-    def _apply(lst: List[str]):
-        _set_and_rerun(text_input_key, ", ".join(lst))
-
-    for i, s in enumerate(suggestions):
-        col = cols[i % len(cols)]
-        with col:
-            if st.button(s, key=f"{key_prefix}_chip_{i}", help="Click to add"):
-                lst: List[str] = list(st.session_state.get(state_list_name, []))
-                if s not in lst:
-                    lst.append(s)
-                    st.session_state[state_list_name] = lst
-                _apply(lst)
-
-    b1, b2, _ = st.columns([1, 1, 6])
-    with b1:
-        if st.button("Add all", key=f"{key_prefix}_addall"):
-            lst = list(st.session_state.get(state_list_name, []))
-            for s in suggestions:
-                if s not in lst:
-                    lst.append(s)
-            st.session_state[state_list_name] = lst
-            _apply(lst)
-    with b2:
-        if st.button("Clear", key=f"{key_prefix}_clear"):
-            st.session_state[state_list_name] = []
-            _apply([])
-
-
-# ------------- Warm-up button -------------
+# ------------- Warm-up (optional) -------------
 def warm_up_render(url: str, timeout: int = 10) -> str:
     if not url:
         return "No wake URL set. Add RENDER_WAKE_URL to your environment."
@@ -301,7 +231,7 @@ def warm_up_render(url: str, timeout: int = 10) -> str:
         return f"Warm-up failed: {e}"
 
 
-# --------------------- Trends (inline) --------------------
+# --------------------- Trends helpers --------------------
 def google_trends_rising(keywords: List[str], geo="US", timeframe="now 7-d") -> Dict:
     try:
         from pytrends.request import TrendReq
@@ -344,8 +274,7 @@ def reddit_hot_or_top(subreddits: List[str], mode: str = "hot", limit: int = 15)
     csec = _env("REDDIT_CLIENT_SECRET")
     ua = _env("REDDIT_USER_AGENT", "Wave/1.0 (https://wave; contact: owner@example.com)")
 
-    posts = []
-    note = ""
+    posts, note = [], ""
     if praw and cid and csec and ua:
         try:
             reddit = praw.Reddit(client_id=cid, client_secret=csec, user_agent=ua, check_for_async=False)
@@ -369,7 +298,7 @@ def reddit_hot_or_top(subreddits: List[str], mode: str = "hot", limit: int = 15)
         except Exception as e:
             note = f"PRAW unavailable: {e}"
 
-    # public endpoint fallback
+    # public fallback
     try:
         headers = {"User-Agent": ua}
         for sub in (subreddits or [])[:6]:
@@ -503,12 +432,12 @@ st.sidebar.success("LangGraph Orchestrator: ON")
 st.sidebar.success("CrewAI Growth Crew: ON")
 autogpt_url = st.sidebar.text_input("AutoGPT Webhook URL (optional)", _env("AUTOGPT_URL", ""))
 
-# Pro flags: ALWAYS ON
+# Pro flags (always on)
 use_langchain = True
 use_langgraph = True
 use_crewai = True
 
-# Session vars
+# Session defaults
 st.session_state.setdefault("trend_data_cache", None)
 st.session_state.setdefault("lead_data_cache", None)
 st.session_state.setdefault("reddit_mode", "hot")
@@ -516,6 +445,11 @@ st.session_state.setdefault("out_persona", "Local Professional")
 st.session_state.setdefault("niche_keywords_list", [])
 st.session_state.setdefault("subreddits_list", [])
 st.session_state.setdefault("feeder_cats_list", [])
+st.session_state.setdefault("trend_niche", "real estate, mortgage, school districts")
+st.session_state.setdefault("trend_city", "Katy")
+st.session_state.setdefault("trend_state", "TX")
+st.session_state.setdefault("trend_subs", "RealEstate, Austin, personalfinance")
+
 
 st.title("🌊 Wave — AI Growth Team (Pro)")
 st.caption("Trends → Leads → Outreach (+ LangChain, LangGraph, CrewAI).")
@@ -535,34 +469,8 @@ with tab1:
             "- **YouTube** fresh videos for zeitgeist\n"
             "- An **AI market summary** and post ideas\n"
         )
-    st.selectbox("Reddit ranking", ["hot", "top"], index=0, key="reddit_mode")
 
-    # === MAIN FORM (one submit) ===
-    trend_form = st.form(key="trend_form", clear_on_submit=False)
-    with trend_form:
-        niche = st.text_input(
-            "Niche keywords (comma-separated)",
-            "real estate, mortgage, school districts",
-            key="trend_niche",
-            help="Tip: Use the suggestion chips below to auto-fill this box."
-        )
-        city = st.text_input("City", "Katy", key="trend_city")
-        state = st.text_input("State", "TX", key="trend_state")
-        subs = st.text_input(
-            "Reddit subs (comma-separated)",
-            "RealEstate, Austin, personalfinance",
-            key="trend_subs",
-            help="Tip: Use the suggestion chips below to auto-fill this box."
-        )
-        timeframe = st.selectbox(
-            "Google Trends timeframe",
-            ["now 7-d", "now 1-d", "now 30-d", "today 3-m"],
-            index=0,
-            key="trend_timeframe",
-        )
-        submitted = st.form_submit_button("Fetch trends")  # keep simple for max compatibility
-
-    # === AI SUGGESTION BUTTONS (OUTSIDE THE FORM) ===
+    # 1) SUGGESTION BUTTONS + CHIPS (BEFORE the form)
     colA, colB, colC = st.columns(3)
     with colA:
         if st.button("💡 Suggest keywords", key="btn_suggest_kw"):
@@ -573,6 +481,7 @@ with tab1:
             )
             raw = llm(prompt, system="You are a local SEO researcher.", temp=0.2)
             st.session_state["suggested_keywords"] = extract_strings(raw, max_items=24)
+
     with colB:
         if st.button("💬 Suggest subreddits", key="btn_suggest_subs"):
             prompt = (
@@ -582,6 +491,7 @@ with tab1:
             )
             raw = llm(prompt, system="You find relevant subreddits.", temp=0.3)
             st.session_state["suggested_subs"] = extract_strings(raw, max_items=20)
+
     with colC:
         if st.button("🧲 Suggest feeder categories (for Lead Finder)", key="btn_suggest_feeders"):
             prompt = (
@@ -593,18 +503,97 @@ with tab1:
             raw = llm(prompt, system="You suggest feeder businesses for partnerships.", temp=0.3)
             st.session_state["suggested_feeders"] = extract_strings(raw, max_items=24)
 
-    # Render chips (rerun-safe updates to inputs)
+    # chips → mutate state (no text inputs exist yet → safe) then rerun
+    def _append_to_list_then_rerun(list_key: str, input_key: str, value: str):
+        lst = list(st.session_state.get(list_key, []))
+        if value not in lst:
+            lst.append(value)
+        st.session_state[list_key] = lst
+        st.session_state[input_key] = ", ".join(lst)
+        st.rerun()
+
     kw_sug = st.session_state.get("suggested_keywords", [])
     if kw_sug:
-        render_chips_and_capture("Suggested keywords:", kw_sug, "kw", "niche_keywords_list", "trend_niche")
+        st.markdown("**Suggested keywords:**")
+        cols = st.columns(min(4, max(1, len(kw_sug)//6 + 1)))
+        for i, s in enumerate(kw_sug):
+            with cols[i % len(cols)]:
+                if st.button(s, key=f"kw_chip_{i}"):
+                    _append_to_list_then_rerun("niche_keywords_list", "trend_niche", s)
+        c1, c2, _ = st.columns([1,1,6])
+        with c1:
+            if st.button("Add all", key="kw_add_all"):
+                for s in kw_sug:
+                    if s not in st.session_state["niche_keywords_list"]:
+                        st.session_state["niche_keywords_list"].append(s)
+                st.session_state["trend_niche"] = ", ".join(st.session_state["niche_keywords_list"])
+                st.rerun()
+        with c2:
+            if st.button("Clear", key="kw_clear"):
+                st.session_state["niche_keywords_list"] = []
+                st.session_state["trend_niche"] = ""
+                st.rerun()
 
     subs_sug = st.session_state.get("suggested_subs", [])
     if subs_sug:
-        render_chips_and_capture("Suggested subreddits:", subs_sug, "sub", "subreddits_list", "trend_subs")
+        st.markdown("**Suggested subreddits:**")
+        cols = st.columns(min(4, max(1, len(subs_sug)//6 + 1)))
+        for i, s in enumerate(subs_sug):
+            with cols[i % len(cols)]:
+                if st.button(s, key=f"sub_chip_{i}"):
+                    _append_to_list_then_rerun("subreddits_list", "trend_subs", s)
+        c1, c2, _ = st.columns([1,1,6])
+        with c1:
+            if st.button("Add all", key="sub_add_all"):
+                for s in subs_sug:
+                    if s not in st.session_state["subreddits_list"]:
+                        st.session_state["subreddits_list"].append(s)
+                st.session_state["trend_subs"] = ", ".join(st.session_state["subreddits_list"])
+                st.rerun()
+        with c2:
+            if st.button("Clear", key="sub_clear"):
+                st.session_state["subreddits_list"] = []
+                st.session_state["trend_subs"] = ""
+                st.rerun()
 
     feed_sug = st.session_state.get("suggested_feeders", [])
     if feed_sug:
-        render_chips_and_capture("Suggested feeder categories:", feed_sug, "feed", "feeder_cats_list", "lead_cat")
+        st.markdown("**Suggested feeder categories:**")
+        cols = st.columns(min(4, max(1, len(feed_sug)//6 + 1)))
+        for i, s in enumerate(feed_sug):
+            with cols[i % len(cols)]:
+                if st.button(s, key=f"feed_chip_{i}"):
+                    _append_to_list_then_rerun("feeder_cats_list", "lead_cat", s)
+        c1, c2, _ = st.columns([1,1,6])
+        with c1:
+            if st.button("Add all", key="feed_add_all"):
+                for s in feed_sug:
+                    if s not in st.session_state["feeder_cats_list"]:
+                        st.session_state["feeder_cats_list"].append(s)
+                # Note: lead_cat input lives in Lead Finder tab; we still prefill its state here.
+                st.session_state["lead_cat"] = ", ".join(st.session_state["feeder_cats_list"])
+                st.rerun()
+        with c2:
+            if st.button("Clear", key="feed_clear"):
+                st.session_state["feeder_cats_list"] = []
+                st.session_state["lead_cat"] = ""
+                st.rerun()
+
+    st.selectbox("Reddit ranking", ["hot", "top"], index=0, key="reddit_mode")
+
+    # 2) THE FORM (after chips; safe to read state)
+    trend_form = st.form(key="trend_form", clear_on_submit=False)
+    with trend_form:
+        niche = st.text_input("Niche keywords (comma-separated)",
+                              st.session_state.get("trend_niche", ""), key="trend_niche")
+        city = st.text_input("City", st.session_state.get("trend_city", "Katy"), key="trend_city")
+        state = st.text_input("State", st.session_state.get("trend_state", "TX"), key="trend_state")
+        subs = st.text_input("Reddit subs (comma-separated)",
+                             st.session_state.get("trend_subs", ""), key="trend_subs")
+        timeframe = st.selectbox("Google Trends timeframe",
+                                 ["now 7-d", "now 1-d", "now 30-d", "today 3-m"],
+                                 index=0, key="trend_timeframe")
+        submitted = st.form_submit_button("Fetch trends")
 
     # Compute on submit
     if submitted:
@@ -617,6 +606,7 @@ with tab1:
         )
         st.session_state.trend_data_cache = data
 
+    # Results
     data = st.session_state.trend_data_cache
     if not data:
         st.info("Enter your niche/city and click **Fetch trends**.")
@@ -792,7 +782,7 @@ with tab2:
                     ) or
                     f"Hi {lead2['Name']} team,\n\nI’d love to explore a simple referral partnership. "
                     "We serve the same customers and can help each other win more business. "
-                    "Could we schedule a 10-minute chat this week?\n\nBest,\n<Your Name>")
+                    "Could we schedule a 10-minute chat this week?\n\nBest,\n<Your Name>"))
                     st.code(body)
             with colB:
                 if st.button("Draft SMS", use_container_width=True, key="btn_sms"):
@@ -800,8 +790,7 @@ with tab2:
                         system="You write concise SMS for local B2B outreach.",
                         prompt=(f"Write a friendly 240-character text to {lead2['Name']} proposing a quick chat about referrals. "
                                 f"One clear CTA.")
-                    ) or
-                    f"Hi {lead2['Name']}! Quick idea: partner on referrals? 10-min chat this week?")
+                    ) or f"Hi {lead2['Name']}! Quick idea: partner on referrals? 10-min chat this week?")
                     st.code(sms)
 
         if autogpt_url:
@@ -975,8 +964,7 @@ with tab5:
             g.add_node("research", do_research)
             g.add_node("content", do_content)
             g.set_entry_point("decide")
-            def router(state: S):
-                return state["intent"]
+            def router(state: S): return state["intent"]
             g.add_conditional_edges("decide", router, {"research": "research", "content": "content"})
             g.add_edge("research", END)
             g.add_edge("content", END)
