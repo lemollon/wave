@@ -1,11 +1,9 @@
-# app.py — Wave — Trends → Leads → Outreach → Weekly Report + (optional) LangChain/LangGraph/CrewAI
-# This version keeps your original structure and features, and makes ONLY the requested fixes:
-# - Do not place st.button() inside st.form (use only st.form_submit_button inside forms).
-# - Guard st.secrets access on Render to avoid "No secrets file" banner.
-# - Make pytrends timestamps JSON-serializable.
-# - Make Reddit rendering robust when columns are missing.
-# - Add AI suggestions for keywords/subreddits/feeders (sanitized) with clickable chips that append to inputs.
-# - Keep the original sidebar toggles/sections.
+# app.py — Wave — Trends → Leads → Outreach → Weekly Report + (Pro always ON)
+# Fixes:
+# - Remove sidebar toggles; Pro features are always enabled.
+# - No “missing submit button” warnings: each st.form has exactly one st.form_submit_button().
+# - Avoid compatibility issues: don't pass extra args like use_container_width/key to form_submit_button.
+# - Keep all prior features and stability guards.
 
 import os
 import io
@@ -70,10 +68,7 @@ except Exception:
 
 # -------------------- ENV / helpers --------------------
 def _env(k: str, d: str = "") -> str:
-    """
-    Read from env vars first. Only touch st.secrets if a secrets.toml actually exists
-    (prevents 'No secrets files found' banner on Render).
-    """
+    """Read env first; only touch st.secrets if a secrets.toml exists."""
     v = os.getenv(k)
     if v:
         return v
@@ -173,7 +168,6 @@ def kpi(label: str, value: str):
 
 
 def helper_banner():
-    # Small instruction banner (Trend Rider is the anchor). You asked for this guidance copy.
     st.markdown(
         """
         <div class="helper-banner">
@@ -190,15 +184,7 @@ _JSON_FENCE_RE = re.compile(r"^```+|```+$", flags=re.MULTILINE)
 _QUOTES_RE = re.compile(r"(^[\"'`\\s]+|[\"'`\\s]+$)")
 
 def extract_strings(raw: Any, max_items: int = 24) -> List[str]:
-    """
-    Accepts LLM output that might be:
-     - a JSON array string
-     - a dict
-     - plain text with code fences / 'json' labels / brackets / quotes
-    Returns a clean list of strings, trimmed & de-duped.
-    """
     out: List[str] = []
-
     if raw is None:
         return out
 
@@ -206,7 +192,7 @@ def extract_strings(raw: Any, max_items: int = 24) -> List[str]:
         candidates = list(raw)
     else:
         txt = str(raw).strip()
-        txt = _JSON_FENCE_RE.sub("", txt).strip()           # remove code fences
+        txt = _JSON_FENCE_RE.sub("", txt).strip()
         if txt.lower().startswith("json"):
             txt = re.sub(r"^json\\s*[:\\-]*", "", txt, flags=re.IGNORECASE).strip()
         try:
@@ -249,15 +235,10 @@ def extract_strings(raw: Any, max_items: int = 24) -> List[str]:
 
 def render_chips_and_capture(label: str, suggestions: List[str], key_prefix: str,
                              state_list_name: str, text_input_key: str):
-    """
-    Render clickable chips. When clicked, add to a session_state list
-    and mirror the list back into the referenced text input (comma-separated).
-    This lives OUTSIDE any st.form.
-    """
+    """Clickable chips that update session_state list + mirror to a text input."""
     if not suggestions:
         return
 
-    # Ensure expected session structures exist
     st.session_state.setdefault(state_list_name, [])
     st.session_state.setdefault(text_input_key, st.session_state.get(text_input_key, ""))
 
@@ -288,7 +269,7 @@ def render_chips_and_capture(label: str, suggestions: List[str], key_prefix: str
             st.session_state[text_input_key] = ""
 
 
-# ------------- Warm-up button (Render/Cloud cold starts) -------------
+# ------------- Warm-up button -------------
 def warm_up_render(url: str, timeout: int = 10) -> str:
     if not url:
         return "No wake URL set. Add RENDER_WAKE_URL to your environment."
@@ -335,10 +316,7 @@ def google_trends_rising(keywords: List[str], geo="US", timeframe="now 7-d") -> 
 
 
 def reddit_hot_or_top(subreddits: List[str], mode: str = "hot", limit: int = 15) -> Dict:
-    """
-    PRAW path if creds exist; otherwise public JSON with resilient UA and raw_json=1.
-    Surfaces a 'note' when blocked so the UI shows why posts may be blank.
-    """
+    """PRAW if creds exist; fallback to public JSON."""
     try:
         import praw
     except Exception:
@@ -489,7 +467,7 @@ def search_places_optional(query: str, city: str, state: str, limit: int = 12, a
 st.set_page_config(page_title="Wave — AI Growth Team (Pro)", page_icon="🌊", layout="wide")
 inject_css()
 
-# Sidebar: theme + Warm-up + Pro toggles (keep your original behavior)
+# Sidebar: theme + Warm-up + Pro status (always on)
 st.sidebar.markdown("### Appearance")
 theme = st.sidebar.radio("Theme", ["Dark", "Light"], index=0)
 if theme == "Light":
@@ -501,25 +479,28 @@ if st.sidebar.button("🔥 Warm up the AI"):
     msg = warm_up_render(wake_url)
     (st.sidebar.success if msg.startswith("Warmed") else st.sidebar.warning)(msg)
 
-st.sidebar.markdown("### Pro toggles (optional)")
-use_langchain = st.sidebar.toggle("LangChain Enricher", value=False)
-use_langgraph = st.sidebar.toggle("LangGraph Orchestrator", value=False)
-use_crewai = st.sidebar.toggle("CrewAI Growth Crew", value=False)
+st.sidebar.markdown("### Pro features")
+st.sidebar.success("LangChain Enricher: ON")
+st.sidebar.success("LangGraph Orchestrator: ON")
+st.sidebar.success("CrewAI Growth Crew: ON")
 autogpt_url = st.sidebar.text_input("AutoGPT Webhook URL (optional)", _env("AUTOGPT_URL", ""))
 
-# Session vars (keep your original)
+# Pro flags: ALWAYS ON
+use_langchain = True
+use_langgraph = True
+use_crewai = True
+
+# Session vars
 st.session_state.setdefault("trend_data_cache", None)
 st.session_state.setdefault("lead_data_cache", None)
 st.session_state.setdefault("reddit_mode", "hot")
 st.session_state.setdefault("out_persona", "Local Professional")
-
-# Lists for AI chips (NEW but minimal and safe)
 st.session_state.setdefault("niche_keywords_list", [])
 st.session_state.setdefault("subreddits_list", [])
 st.session_state.setdefault("feeder_cats_list", [])
 
 st.title("🌊 Wave — AI Growth Team (Pro)")
-st.caption("Trends → Leads → Outreach (+ optional LangChain, LangGraph, CrewAI).")
+st.caption("Trends → Leads → Outreach (+ LangChain, LangGraph, CrewAI).")
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(
     ["Trend Rider", "Lead Finder", "Outreach Factory", "Weekly Report", "Pro Lab"]
@@ -538,7 +519,7 @@ with tab1:
         )
     st.selectbox("Reddit ranking", ["hot", "top"], index=0, key="reddit_mode")
 
-    # === MAIN FORM (unchanged behavior; only one submit inside) ===
+    # === MAIN FORM (one submit) ===
     trend_form = st.form(key="trend_form", clear_on_submit=False)
     with trend_form:
         niche = st.text_input(
@@ -561,8 +542,7 @@ with tab1:
             index=0,
             key="trend_timeframe",
         )
-        # IMPORTANT: Only one submit inside the form.
-        submitted = trend_form.form_submit_button("Fetch trends", key="trend_submit", use_container_width=True)
+        submitted = st.form_submit_button("Fetch trends")  # keep simple for max compatibility
 
     # === AI SUGGESTION BUTTONS (OUTSIDE THE FORM) ===
     colA, colB, colC = st.columns(3)
@@ -571,8 +551,7 @@ with tab1:
             prompt = (
                 f"Industry context from keywords: {st.session_state.get('trend_niche','')}\n"
                 f"Location: {st.session_state.get('trend_city','')}, {st.session_state.get('trend_state','')}\n"
-                f"Suggest 12 high-intent niche keywords (5-30 chars each). "
-                f"Return a JSON array of strings only."
+                f"Suggest 12 high-intent niche keywords (5-30 chars each). Return a JSON array of strings only."
             )
             raw = llm(prompt, system="You are a local SEO researcher.", temp=0.2)
             st.session_state["suggested_keywords"] = extract_strings(raw, max_items=24)
@@ -581,8 +560,7 @@ with tab1:
             prompt = (
                 f"Industry context from keywords: {st.session_state.get('trend_niche','')}\n"
                 f"City/State: {st.session_state.get('trend_city','')}, {st.session_state.get('trend_state','')}\n"
-                f"Suggest 10 relevant subreddits (names only, no r/ prefix). "
-                f"Return a JSON array of strings."
+                f"Suggest 10 relevant subreddits (names only, no r/ prefix). Return a JSON array of strings."
             )
             raw = llm(prompt, system="You find relevant subreddits.", temp=0.3)
             st.session_state["suggested_subs"] = extract_strings(raw, max_items=20)
@@ -591,14 +569,13 @@ with tab1:
             prompt = (
                 f"Industry context from keywords: {st.session_state.get('trend_niche','')}\n"
                 f"City/State: {st.session_state.get('trend_city','')}, {st.session_state.get('trend_state','')}\n"
-                f"Suggest 12 feeder business categories that see this industry's customers first "
-                f"(e.g., for real estate: apartment complexes, movers, mortgage brokers). "
+                f"Suggest 12 feeder business categories that see this industry's customers first. "
                 f"Return a JSON array of short strings."
             )
             raw = llm(prompt, system="You suggest feeder businesses for partnerships.", temp=0.3)
             st.session_state["suggested_feeders"] = extract_strings(raw, max_items=24)
 
-    # Render chips and allow one-click population of inputs
+    # Render chips
     kw_sug = st.session_state.get("suggested_keywords", [])
     if kw_sug:
         render_chips_and_capture("Suggested keywords:", kw_sug, "kw", "niche_keywords_list", "trend_niche")
@@ -609,16 +586,15 @@ with tab1:
 
     feed_sug = st.session_state.get("suggested_feeders", [])
     if feed_sug:
-        # We mirror to a Lead Finder text box (created on that tab), safe to pre-populate its state here.
         render_chips_and_capture("Suggested feeder categories:", feed_sug, "feed", "feeder_cats_list", "lead_cat")
 
-    # Compute on submit (same logic as you had)
+    # Compute on submit
     if submitted:
         keywords = [s.strip() for s in st.session_state.trend_niche.split(",") if s.strip()]
         sub_list = [s.strip().lstrip("r/") for s in st.session_state.trend_subs.split(",") if s.strip()]
         data = gather_trends(
             niche_keywords=keywords, city=city, state=state, subs=sub_list,
-            timeframe=timeframe, youtube_api_key=_env("YOUTUBE_API_KEY", ""),
+            timeframe=st.session_state.trend_timeframe, youtube_api_key=_env("YOUTUBE_API_KEY", ""),
             reddit_mode=st.session_state.reddit_mode
         )
         st.session_state.trend_data_cache = data
@@ -645,7 +621,6 @@ with tab1:
             st.dataframe(posts[safe_cols].head(20), use_container_width=True)
         else:
             st.warning("Reddit posts unavailable (API blocked or no data).")
-            # AI fallback summary (not posts)
             sample_kw = ", ".join([s.strip() for s in st.session_state.get("trend_niche","").split(",")][:5])
             ai_box = llm(
                 system="You summarize discussion themes (not fabricating posts).",
@@ -690,14 +665,13 @@ with tab2:
             "- Typical targets for real estate: *apartment complex, movers, mortgage broker, home builder*.\n"
         )
 
-    # Form with submit (unchanged)
     lead_form = st.form(key="lead_form", clear_on_submit=False)
     with lead_form:
         cat = st.text_input("Place type / query", st.session_state.get("lead_cat", "apartment complex"), key="lead_cat")
         city2 = st.text_input("City", st.session_state.get("trend_city", "Katy"), key="lead_city")
         state2 = st.text_input("State", st.session_state.get("trend_state", "TX"), key="lead_state")
         limit = st.slider("How many?", 5, 30, 12, key="lead_limit")
-        go = lead_form.form_submit_button("Search", key="lead_submit", use_container_width=True)
+        go = st.form_submit_button("Search")  # keep simple
 
     def actionability_score(row, query: str):
         score, reasons = 0, []
@@ -742,13 +716,11 @@ with tab2:
         with c2: kpi("Avg rating", f"{scored['Rating'].mean():.2f}" if len(scored) else "–")
         with c3: kpi("Median reviews", f"{int(scored['Reviews'].median())}" if len(scored) else "–")
 
-        # table
         dff = scored.reset_index(drop=True).copy()
         st.markdown("#### Ranked leads")
         show_cols = ["Name", "Score", "Why", "Rating", "Reviews", "Phone", "Website", "Address"]
         st.dataframe(dff[show_cols], use_container_width=True)
 
-        # Select + details panel
         if "Name" in dff.columns and len(dff) > 0:
             name_choice = st.selectbox("Select a business", list(dff["Name"].astype(str).unique()))
         else:
@@ -766,7 +738,6 @@ with tab2:
                 f"- 🧭 [Open in Google Maps]({row.get('MapsUrl','')})"
             )
 
-        # map
         if MAPS_OK:
             st.markdown("#### Map")
             dfc = dff.dropna(subset=["Lat", "Lng"]).copy()
@@ -788,7 +759,6 @@ with tab2:
         st.download_button("⬇️ Export CSV", dff[show_cols].to_csv(index=False).encode("utf-8"),
                            "leads.csv", "text/csv")
 
-        # One-click outreach
         st.markdown("#### One-click outreach")
         if name_choice:
             lead2 = dff[dff["Name"].astype(str) == str(name_choice)].iloc[0].to_dict()
@@ -816,7 +786,6 @@ with tab2:
                     f"Hi {lead2['Name']}! Quick idea: partner on referrals? 10-min chat this week?")
                     st.code(sms)
 
-        # AutoGPT webhook (optional)
         if autogpt_url:
             if st.button("Arm AutoGPT: watch for new high-score leads", key="btn_autogpt"):
                 payload = {"action": "lead_watch", "query": cat, "city": city2, "state": state2, "threshold": 85}
@@ -851,7 +820,6 @@ with tab3:
              "body": "Happy to help with referrals and co-marketing. What works?"}
         ][:touches]
 
-    # Keep same prompt logic as your original
         prompt = (
             f"Polish this outreach for a {persona} to contact {target}. "
             f"Keep SAME dates and channels. Tone: {tone}. Return PLAIN TEXT (not JSON). "
@@ -912,16 +880,14 @@ with tab4:
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
 
-# ===================== PRO LAB (stubs) =====================
+# ===================== PRO LAB =====================
 with tab5:
-    st.subheader("Pro Lab — LangChain · LangGraph · CrewAI (optional)")
+    st.subheader("Pro Lab — LangChain · LangGraph · CrewAI")
     st.caption("These automate deeper research/polish. The app runs fine without them.")
 
     # LangChain Enricher
-    st.markdown("### LangChain Enricher")
-    if not use_langchain:
-        st.info("Toggle **LangChain Enricher** in the sidebar to enable.")
-    elif not (LC_OK and LCO_OK and OPENAI_API_KEY):
+    st.markdown("### LangChain Enricher (ON)")
+    if not (LC_OK and LCO_OK and OPENAI_API_KEY):
         st.warning("LangChain libraries or OPENAI_API_KEY missing.")
     else:
         leads_df = st.session_state.lead_data_cache
@@ -959,10 +925,8 @@ with tab5:
     st.divider()
 
     # LangGraph Orchestrator
-    st.markdown("### LangGraph Orchestrator")
-    if not use_langgraph:
-        st.info("Toggle **LangGraph Orchestrator** in the sidebar to enable.")
-    elif not (LG_OK and LCO_OK and OPENAI_API_KEY):
+    st.markdown("### LangGraph Orchestrator (ON)")
+    if not (LG_OK and LCO_OK and OPENAI_API_KEY):
         st.warning("LangGraph libraries or OPENAI_API_KEY missing.")
     else:
         trend_data = st.session_state.trend_data_cache
@@ -1006,10 +970,8 @@ with tab5:
     st.divider()
 
     # CrewAI Growth Crew
-    st.markdown("### CrewAI Growth Crew")
-    if not use_crewai:
-        st.info("Toggle **CrewAI Growth Crew** in the sidebar to enable.")
-    elif not (CREW_OK and OPENAI_API_KEY):
+    st.markdown("### CrewAI Growth Crew (ON)")
+    if not (CREW_OK and OPENAI_API_KEY):
         st.warning("CrewAI not installed or OPENAI_API_KEY missing.")
     else:
         biz = st.text_input("Business", st.session_state.get("out_persona", "Real Estate Agent"), key="crew_biz")
@@ -1041,6 +1003,6 @@ with tab5:
             st.markdown("#### One-pager")
             st.markdown(str(result))
 
-# If OPENAI_API_KEY is missing, show a gentle hint (does not stop the app)
+# Gentle hint if OPENAI_API_KEY is missing
 if client is None and not _env("OPENAI_API_KEY", ""):
     st.caption("Set OPENAI_API_KEY in your environment or Streamlit secrets to enable AI features.")
