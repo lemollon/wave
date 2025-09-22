@@ -1,5 +1,6 @@
 # app.py — Wave (Pulse companion) — Trends → Leads → Outreach → Weekly Report + Pro Lab
 # Adds: clean AI suggestions, clickable chips, persistent lists, global Industry banner, Clear-all context.
+# Fixes: no assignment to st.session_state on widget creation; _env() avoids secrets banner on Render.
 
 import os
 import io
@@ -65,16 +66,24 @@ except Exception:
 # -------------------- ENV / helpers --------------------
 def _env(k: str, d: str = "") -> str:
     """
-    Look up a value from OS env; if absent, fall back to Streamlit secrets.
-    Works on Render (env vars) and Streamlit Cloud (secrets).
+    Read from env vars first. Only touch st.secrets if a secrets.toml actually exists
+    to avoid Streamlit's 'No secrets files found' banner on Render.
     """
     v = os.getenv(k)
-    if not v:
-        try:
-            v = st.secrets.get(k, d)  # safe even if secrets isn't configured
-        except Exception:
-            v = d
-    return v
+    if v:
+        return v
+
+    try:
+        secrets_paths = ("/root/.streamlit/secrets.toml", "/app/.streamlit/secrets.toml")
+        if any(os.path.exists(p) for p in secrets_paths):
+            try:
+                return st.secrets.get(k, d)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    return d
 
 
 OPENAI_API_KEY = _env("OPENAI_API_KEY", "")
@@ -200,7 +209,6 @@ def extract_strings(raw: Any, max_items: int = 24) -> List[str]:
 
         # if it looks like "json\n[...]" or startswith "json", drop leading label
         if txt.lower().startswith("json"):
-            # remove a leading 'json' word and possible colon
             txt = re.sub(r"^json\\s*[:\\-]*", "", txt, flags=re.IGNORECASE).strip()
 
         # try JSON parse first
@@ -209,7 +217,6 @@ def extract_strings(raw: Any, max_items: int = 24) -> List[str]:
             if isinstance(data, list):
                 candidates = data
             elif isinstance(data, dict):
-                # if dict: collect string values
                 candidates = []
                 for v in data.values():
                     if isinstance(v, list):
@@ -221,10 +228,8 @@ def extract_strings(raw: Any, max_items: int = 24) -> List[str]:
         except Exception:
             # fallback: strip brackets and split by comma/newline
             txt2 = txt.strip()
-            # remove outer brackets if present
             if txt2.startswith("[") and txt2.endswith("]"):
                 txt2 = txt2[1:-1]
-            # split on commas & newlines
             parts = re.split(r"[\\n,]", txt2)
             candidates = [p for p in parts]
 
@@ -259,7 +264,6 @@ def render_chips_and_capture(label: str, suggestions: List[str], key_prefix: str
 
     st.markdown(f"**{label}**")
     cols = st.columns(min(4, max(1, len(suggestions)//6 + 1)))
-    # display in columns to wrap nicer
     i = 0
     for s in suggestions:
         col = cols[i % len(cols)]
@@ -269,11 +273,10 @@ def render_chips_and_capture(label: str, suggestions: List[str], key_prefix: str
                 if s not in lst:
                     lst.append(s)
                     st.session_state[state_list_name] = lst
-                # also reflect into text input
+                # reflect into text input
                 st.session_state[text_input_key] = ", ".join(lst)
         i += 1
 
-    # bulk actions
     b1, b2, _ = st.columns([1,1,6])
     with b1:
         if st.button("Add all", key=f"{key_prefix}_addall"):
@@ -344,7 +347,6 @@ def reddit_hot_or_top(subreddits: List[str], mode: str = "hot", limit: int = 15)
     try:
         import praw
     except Exception:
-        # fallback to public endpoint
         praw = None
 
     cid = _env("REDDIT_CLIENT_ID")
@@ -556,7 +558,7 @@ with tab1:
     # Industry anchor (NEW prominent field)
     c_ind, c_rank = st.columns([3,1])
     with c_ind:
-        st.session_state.industry = st.text_input(
+        st.text_input(
             "Industry (anchor for suggestions across the app)",
             st.session_state.get("industry", "Real Estate"),
             key="industry",
@@ -573,7 +575,7 @@ with tab1:
         # inputs
         c1, c2, c3 = st.columns([3,1.2,1])
         with c1:
-            niche = st.text_input(
+            st.text_input(
                 "Niche keywords (comma-separated)",
                 value=st.session_state.get("trend_niche", "real estate, mortgage, school districts"),
                 key="trend_niche",
@@ -586,7 +588,7 @@ with tab1:
 
         c4, c5 = st.columns([3,3])
         with c4:
-            subs = st.text_input(
+            st.text_input(
                 "Reddit subs (comma-separated)",
                 st.session_state.get("trend_subs", "RealEstate, Austin, personalfinance"),
                 key="trend_subs",
@@ -1005,125 +1007,4 @@ with tab5:
     if not use_langchain:
         st.info("Toggle **LangChain Enricher** in the sidebar to enable.")
     elif not (LC_OK and LCO_OK and OPENAI_API_KEY):
-        st.warning("LangChain libraries or OPENAI_API_KEY missing.")
-    else:
-        leads_df = st.session_state.lead_data_cache
-        if isinstance(leads_df, pd.DataFrame) and not leads_df.empty:
-            top_n = st.slider("How many leads to enrich?", 3, 15, 5, key="lc_topn")
-            model = ChatOpenAI(model="gpt-4o-mini", temperature=0.2, api_key=OPENAI_API_KEY)
-            prompt = ChatPromptTemplate.from_template(
-                "Rate partner fit for referrals.\nLead: {lead}\nReturn JSON: fit(1-100), why, next_action."
-            )
-            enriched_rows = []
-            for _, row in leads_df.head(top_n).iterrows():
-                lead_json = row.to_dict()
-                try:
-                    msg = model.invoke(prompt.format_messages(lead=json.dumps(lead_json)))
-                    txt = (msg.content or "").strip()
-                    data = {}
-                    try:
-                        data = json.loads(txt)
-                    except Exception:
-                        start = txt.find("{"); end = txt.rfind("}")
-                        if start != -1 and end != -1:
-                            data = json.loads(txt[start:end+1])
-                    enriched_rows.append({
-                        "Name": row["Name"],
-                        "LC_Fit": data.get("fit", 50),
-                        "LC_Why": data.get("why", ""),
-                        "LC_Next": data.get("next_action", ""),
-                    })
-                except Exception as e:
-                    enriched_rows.append({"Name": row["Name"], "LC_Fit": 50, "LC_Why": f"error: {e}", "LC_Next": ""})
-            st.dataframe(pd.DataFrame(enriched_rows), use_container_width=True)
-        else:
-            st.info("Run **Lead Finder** first so we have leads to enrich.")
-
-    st.divider()
-
-    # LangGraph Orchestrator
-    st.markdown("### LangGraph Orchestrator")
-    if not use_langgraph:
-        st.info("Toggle **LangGraph Orchestrator** in the sidebar to enable.")
-    elif not (LG_OK and LCO_OK and OPENAI_API_KEY):
-        st.warning("LangGraph libraries or OPENAI_API_KEY missing.")
-    else:
-        trend_data = st.session_state.trend_data_cache
-        if not trend_data:
-            st.info("Fetch trends in **Trend Rider** first.")
-        else:
-            from typing import TypedDict
-            class S(TypedDict):
-                intent: str
-                brief: str
-            model = ChatOpenAI(model="gpt-4o-mini", temperature=0.2, api_key=OPENAI_API_KEY)
-            def decide(state: S) -> S:
-                rising = trend_data.get("google_trends", {}).get("rising", [])
-                hot = len([r for r in rising if r.get("value", 0) >= 100]) >= 3
-                state["intent"] = "content" if hot else "research"
-                return state
-            def do_research(state: S) -> S:
-                msg = model.invoke(f"Summarize 5 bullet insights from:\n{json.dumps(trend_data)[:6000]}")
-                state["brief"] = (msg.content or "").strip()
-                return state
-            def do_content(state: S) -> S:
-                msg = model.invoke("Draft 3 short post ideas with hooks + CTAs for a local business based on these trends:\n"
-                                   + json.dumps(trend_data)[:6000])
-                state["brief"] = (msg.content or "").strip()
-                return state
-            g = StateGraph(S)
-            g.add_node("decide", decide)
-            g.add_node("research", do_research)
-            g.add_node("content", do_content)
-            g.set_entry_point("decide")
-            def router(state: S):
-                return state["intent"]
-            g.add_conditional_edges("decide", router, {"research": "research", "content": "content"})
-            g.add_edge("research", END)
-            g.add_edge("content", END)
-            app = g.compile()
-            out = app.invoke({"intent": "", "brief": ""})
-            st.info(f"Intent: **{out['intent']}**")
-            st.markdown(out["brief"])
-
-    st.divider()
-
-    # CrewAI Growth Crew
-    st.markdown("### CrewAI Growth Crew")
-    if not use_crewai:
-        st.info("Toggle **CrewAI Growth Crew** in the sidebar to enable.")
-    elif not (CREW_OK and OPENAI_API_KEY):
-        st.warning("CrewAI not installed or OPENAI_API_KEY missing.")
-    else:
-        biz = st.text_input("Business", st.session_state.get("out_persona", "Real Estate Agent"), key="crew_biz")
-        niche = st.text_input("Niche focus", "Relocation in Katy, TX", key="crew_niche")
-        if st.button("Run Growth Crew", key="crew_run"):
-            researcher = Agent(
-                role="Market Researcher",
-                goal="Find insights & angles that will convert for a local SMB.",
-                backstory="You love concise facts and actionable takeaways.",
-                allow_delegation=False,
-                verbose=False,
-                llm=ChatOpenAI(model="gpt-4o-mini", temperature=0.1, api_key=OPENAI_API_KEY),
-            )
-            writer = Agent(
-                role="Copywriter",
-                goal="Write a crisp one-pager a business owner can use today.",
-                backstory="You are crisp, persuasive, and practical.",
-                allow_delegation=False,
-                verbose=False,
-                llm=ChatOpenAI(model="gpt-4o-mini", temperature=0.3, api_key=OPENAI_API_KEY),
-            )
-            t1 = Task(description=f"Summarize 5 bullet insights for {biz} ({niche}). Provide sources if relevant.", agent=researcher)
-            t2 = Task(description="Write a 1-page brief with headline, 3 bullets, 1 CTA. Make it print-friendly.", agent=writer)
-            crew = Crew(agents=[researcher, writer], tasks=[t1, t2])
-            try:
-                result = crew.kickoff()
-            except Exception as e:
-                result = f"(CrewAI runtime error: {e})"
-            st.markdown("#### One-pager")
-            st.markdown(str(result))
-
-# If OPENAI_API_KEY is missing, show a gentle hint (does not stop the app)
-if client is None and not _env("OPENAI_API_KEY", ""):
-    st.caption("Set OPENAI_API_KEY in your environment or Streamlit secrets to enable AI features.")
+        st.warning
