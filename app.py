@@ -1,9 +1,9 @@
 # app.py — Wave — Trends → Leads → Outreach → Weekly Report + (Pro always ON)
 # Fixes:
-# - Remove sidebar toggles; Pro features are always enabled.
-# - No “missing submit button” warnings: each st.form has exactly one st.form_submit_button().
-# - Avoid compatibility issues: don't pass extra args like use_container_width/key to form_submit_button.
-# - Keep all prior features and stability guards.
+# - Chips now update widget values via _set_and_rerun() to avoid StreamlitAPIException.
+# - extract_strings() is stricter to filter partial tokens/junk.
+# - Pro features are always ON (no sidebar toggles).
+# - Each st.form(...) has exactly one st.form_submit_button().
 
 import os
 import io
@@ -68,7 +68,7 @@ except Exception:
 
 # -------------------- ENV / helpers --------------------
 def _env(k: str, d: str = "") -> str:
-    """Read env first; only touch st.secrets if a secrets.toml exists."""
+    """Read env first; only touch st.secrets if a secrets.toml exists (avoids Render banner)."""
     v = os.getenv(k)
     if v:
         return v
@@ -143,12 +143,12 @@ def inject_css():
           .stDataFrame { border:1px solid var(--card-border); border-radius:12px; }
           .stAlert { border-radius:12px; }
           .stButton>button { border-radius:10px; padding:.5rem .9rem; font-weight:600 }
-          .chip { display:inline-block; padding:.35rem .6rem; border:1px solid #2b2f36; border-radius:999px; margin:.25rem .35rem .25rem 0; background:#121621; font-size:.9rem; cursor:pointer;}
-          .chip:hover { background:#1a1f27; }
           .helper-banner {
             border:1px dashed #2b2f36; border-radius:10px; padding:.6rem .8rem; font-size:.9rem; margin: .5rem 0 1rem 0;
             background:rgba(255,255,255,0.02);
           }
+          /* Optional: nicer tiny tags inside tables */
+          .tag { display:inline-block; padding:.2rem .5rem; border-radius:999px; border:1px solid #2b2f36; margin-right:.3rem; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -179,63 +179,77 @@ def helper_banner():
     )
 
 
+# ---------- Rerun-safe widget update ----------
+def _set_and_rerun(widget_key: str, value: str):
+    """Safely update a widget's session_state value after it exists, then rerun."""
+    st.session_state[widget_key] = value
+    st.rerun()
+
+
 # ---------- LLM suggestion sanitation ----------
 _JSON_FENCE_RE = re.compile(r"^```+|```+$", flags=re.MULTILINE)
 _QUOTES_RE = re.compile(r"(^[\"'`\\s]+|[\"'`\\s]+$)")
+_ALLOWED_CHARS_RE = re.compile(r"[^0-9a-zA-Z&+’'()., /\\-]")  # allow words, spaces, basic punct
 
 def extract_strings(raw: Any, max_items: int = 24) -> List[str]:
-    out: List[str] = []
+    """
+    Robustly parse LLM output into a clean list of strings.
+    - Accept JSON arrays/objects or delimited text.
+    - Strip code fences, quotes, 'json:' headers.
+    - Drop very short or partial tokens (length < 3) and junk words.
+    - Normalize spaces and punctuation, dedupe, cap at max_items.
+    """
     if raw is None:
-        return out
+        return []
 
+    candidates: List[str] = []
     if isinstance(raw, (list, tuple)):
         candidates = list(raw)
     else:
         txt = str(raw).strip()
         txt = _JSON_FENCE_RE.sub("", txt).strip()
-        if txt.lower().startswith("json"):
-            txt = re.sub(r"^json\\s*[:\\-]*", "", txt, flags=re.IGNORECASE).strip()
+        txt = re.sub(r"^json\\s*:?\\s*", "", txt, flags=re.IGNORECASE).strip()
         try:
             data = json.loads(txt)
             if isinstance(data, list):
                 candidates = data
             elif isinstance(data, dict):
-                candidates = []
                 for v in data.values():
-                    if isinstance(v, list):
-                        candidates.extend(v)
-                    else:
-                        candidates.append(v)
+                    candidates.extend(v if isinstance(v, list) else [v])
             else:
                 candidates = [txt]
         except Exception:
-            txt2 = txt.strip()
-            if txt2.startswith("[") and txt2.endswith("]"):
-                txt2 = txt2[1:-1]
-            parts = re.split(r"[\\n,]", txt2)
-            candidates = [p for p in parts]
+            inner = txt
+            if inner.startswith("[") and inner.endswith("]"):
+                inner = inner[1:-1]
+            parts = re.split(r"[,\n;]", inner)
+            candidates = parts
 
-    for c in candidates:
-        s = str(c)
-        s = _QUOTES_RE.sub("", s.strip())
-        s = s.strip("[]")
-        s = s.strip()
-        if s:
-            out.append(s)
-
+    cleaned: List[str] = []
     seen = set()
-    clean = []
-    for x in out:
-        if x not in seen:
-            seen.add(x)
-            clean.append(x)
+    for c in candidates:
+        s = str(c).strip()
+        s = _QUOTES_RE.sub("", s)
+        s = _ALLOWED_CHARS_RE.sub("", s)     # remove weird chars
+        s = re.sub(r"\s{2,}", " ", s)        # collapse whitespace
+        s = s.strip("[](){}\"'` ").strip()
+        if not s or len(s) < 3:
+            continue
+        if s.lower() in {"json", "array", "list", "none", "null"}:
+            continue
+        if s not in seen:
+            seen.add(s)
+            cleaned.append(s)
 
-    return clean[:max_items]
+    return cleaned[:max_items]
 
 
 def render_chips_and_capture(label: str, suggestions: List[str], key_prefix: str,
                              state_list_name: str, text_input_key: str):
-    """Clickable chips that update session_state list + mirror to a text input."""
+    """
+    Clickable chips that append to a maintained list and mirror into a text input.
+    Uses _set_and_rerun(...) to safely update an already-instantiated widget key.
+    """
     if not suggestions:
         return
 
@@ -244,29 +258,33 @@ def render_chips_and_capture(label: str, suggestions: List[str], key_prefix: str
 
     st.markdown(f"**{label}**")
     cols = st.columns(min(4, max(1, len(suggestions)//6 + 1)))
+
+    def _apply(lst: List[str]):
+        _set_and_rerun(text_input_key, ", ".join(lst))
+
     for i, s in enumerate(suggestions):
         col = cols[i % len(cols)]
         with col:
             if st.button(s, key=f"{key_prefix}_chip_{i}", help="Click to add"):
-                lst: List[str] = st.session_state.get(state_list_name, [])
+                lst: List[str] = list(st.session_state.get(state_list_name, []))
                 if s not in lst:
                     lst.append(s)
                     st.session_state[state_list_name] = lst
-                st.session_state[text_input_key] = ", ".join(lst)
+                _apply(lst)
 
-    b1, b2, _ = st.columns([1,1,6])
+    b1, b2, _ = st.columns([1, 1, 6])
     with b1:
         if st.button("Add all", key=f"{key_prefix}_addall"):
-            lst = st.session_state.get(state_list_name, [])
+            lst = list(st.session_state.get(state_list_name, []))
             for s in suggestions:
                 if s not in lst:
                     lst.append(s)
             st.session_state[state_list_name] = lst
-            st.session_state[text_input_key] = ", ".join(lst)
+            _apply(lst)
     with b2:
         if st.button("Clear", key=f"{key_prefix}_clear"):
             st.session_state[state_list_name] = []
-            st.session_state[text_input_key] = ""
+            _apply([])
 
 
 # ------------- Warm-up button -------------
@@ -575,7 +593,7 @@ with tab1:
             raw = llm(prompt, system="You suggest feeder businesses for partnerships.", temp=0.3)
             st.session_state["suggested_feeders"] = extract_strings(raw, max_items=24)
 
-    # Render chips
+    # Render chips (rerun-safe updates to inputs)
     kw_sug = st.session_state.get("suggested_keywords", [])
     if kw_sug:
         render_chips_and_capture("Suggested keywords:", kw_sug, "kw", "niche_keywords_list", "trend_niche")
@@ -671,7 +689,7 @@ with tab2:
         city2 = st.text_input("City", st.session_state.get("trend_city", "Katy"), key="lead_city")
         state2 = st.text_input("State", st.session_state.get("trend_state", "TX"), key="lead_state")
         limit = st.slider("How many?", 5, 30, 12, key="lead_limit")
-        go = st.form_submit_button("Search")  # keep simple
+        go = st.form_submit_button("Search")
 
     def actionability_score(row, query: str):
         score, reasons = 0, []
