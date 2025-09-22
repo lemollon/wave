@@ -1,9 +1,11 @@
 # app.py — Wave — Trends → Leads → Outreach → Weekly Report (Pro always ON)
-# Key fixes:
-# - Suggest buttons + chips are rendered BEFORE the form; chip clicks update session_state and rerun safely.
-# - extract_strings() sanitizes LLM output (no partial tokens).
-# - Pro features always ON, no toggles.
+# Highlights:
+# - Glossy pill buttons for chips & all buttons via CSS.
+# - Chips render BEFORE the form, update session_state, then st.rerun() (no StreamlitAPIException).
+# - Robust extract_strings() to avoid partial tokens.
+# - Pro features always ON (no sidebar toggles).
 # - Each st.form has exactly one st.form_submit_button().
+# - Fixed unmatched parenthesis in Draft email block.
 
 import os
 import io
@@ -134,12 +136,36 @@ def inject_css():
         """
         <style>
           :root { --card-bg:#0e1117; --card-border:#2b2f36; }
+
+          /* Cardy bits */
           .kpi-card {border:1px solid var(--card-border); border-radius:14px; padding:16px 18px; background:var(--card-bg);}
           .kpi-label {font-size:.80rem; opacity:.85; letter-spacing:.2px}
           .kpi-value {font-weight:800; font-size:1.25rem; margin-top:4px}
           .stDataFrame { border:1px solid var(--card-border); border-radius:12px; }
           .stAlert { border-radius:12px; }
-          .stButton>button { border-radius:10px; padding:.5rem .9rem; font-weight:600 }
+
+          /* GLOSSY pill buttons (affects all st.button & friends, incl. chips) */
+          .stButton > button, .stDownloadButton > button, .stFormSubmitButton > button {
+            display:inline-block;
+            padding:.45rem .9rem;
+            border:none;
+            border-radius:999px;
+            margin:.25rem .35rem .25rem 0;
+            font-size:.9rem;
+            font-weight:700;
+            color:#fff;
+            background:linear-gradient(145deg, #3a7bd5, #3a6073);
+            box-shadow:0 4px 6px rgba(0,0,0,.25), inset 0 1px 2px rgba(255,255,255,.15);
+            cursor:pointer;
+            transition:all 0.2s ease-in-out;
+          }
+          .stButton > button:hover, .stDownloadButton > button:hover, .stFormSubmitButton > button:hover {
+            background:linear-gradient(145deg, #4facfe, #00f2fe);
+            transform:translateY(-2px);
+            box-shadow:0 6px 10px rgba(0,0,0,.35), inset 0 1px 2px rgba(255,255,255,.25);
+          }
+
+          /* Helper banner */
           .helper-banner {
             border:1px dashed #2b2f36; border-radius:10px; padding:.6rem .8rem; font-size:.9rem; margin:.5rem 0 1rem 0;
             background:rgba(255,255,255,0.02);
@@ -172,6 +198,20 @@ def helper_banner():
         """,
         unsafe_allow_html=True,
     )
+
+
+# ---------- Warm-up (optional) ----------
+def warm_up_render(url: str, timeout: int = 10) -> str:
+    if not url:
+        return "No wake URL set. Add RENDER_WAKE_URL to your environment."
+    try:
+        r = requests.head(url, timeout=timeout, allow_redirects=True)
+        if 200 <= r.status_code < 400:
+            return f"Warmed! ({r.status_code})"
+        r = requests.get(url, timeout=timeout)
+        return f"Warmed! ({r.status_code})" if 200 <= r.status_code < 400 else f"Service responded: {r.status_code}"
+    except Exception as e:
+        return f"Warm-up failed: {e}"
 
 
 # ---------- LLM suggestion sanitation ----------
@@ -215,20 +255,6 @@ def extract_strings(raw: Any, max_items: int = 24) -> List[str]:
             seen.add(s)
             cleaned.append(s)
     return cleaned[:max_items]
-
-
-# ------------- Warm-up (optional) -------------
-def warm_up_render(url: str, timeout: int = 10) -> str:
-    if not url:
-        return "No wake URL set. Add RENDER_WAKE_URL to your environment."
-    try:
-        r = requests.head(url, timeout=timeout, allow_redirects=True)
-        if 200 <= r.status_code < 400:
-            return f"Warmed! ({r.status_code})"
-        r = requests.get(url, timeout=timeout)
-        return f"Warmed! ({r.status_code})" if 200 <= r.status_code < 400 else f"Service responded: {r.status_code}"
-    except Exception as e:
-        return f"Warm-up failed: {e}"
 
 
 # --------------------- Trends helpers --------------------
@@ -437,7 +463,7 @@ use_langchain = True
 use_langgraph = True
 use_crewai = True
 
-# Session defaults
+# Session defaults (also seed form values so chips can prefill)
 st.session_state.setdefault("trend_data_cache", None)
 st.session_state.setdefault("lead_data_cache", None)
 st.session_state.setdefault("reddit_mode", "hot")
@@ -449,7 +475,6 @@ st.session_state.setdefault("trend_niche", "real estate, mortgage, school distri
 st.session_state.setdefault("trend_city", "Katy")
 st.session_state.setdefault("trend_state", "TX")
 st.session_state.setdefault("trend_subs", "RealEstate, Austin, personalfinance")
-
 
 st.title("🌊 Wave — AI Growth Team (Pro)")
 st.caption("Trends → Leads → Outreach (+ LangChain, LangGraph, CrewAI).")
@@ -470,7 +495,7 @@ with tab1:
             "- An **AI market summary** and post ideas\n"
         )
 
-    # 1) SUGGESTION BUTTONS + CHIPS (BEFORE the form)
+    # 1) SUGGESTION BUTTONS + GLOSSY CHIPS (BEFORE the form)
     colA, colB, colC = st.columns(3)
     with colA:
         if st.button("💡 Suggest keywords", key="btn_suggest_kw"):
@@ -503,7 +528,6 @@ with tab1:
             raw = llm(prompt, system="You suggest feeder businesses for partnerships.", temp=0.3)
             st.session_state["suggested_feeders"] = extract_strings(raw, max_items=24)
 
-    # chips → mutate state (no text inputs exist yet → safe) then rerun
     def _append_to_list_then_rerun(list_key: str, input_key: str, value: str):
         lst = list(st.session_state.get(list_key, []))
         if value not in lst:
@@ -570,7 +594,6 @@ with tab1:
                 for s in feed_sug:
                     if s not in st.session_state["feeder_cats_list"]:
                         st.session_state["feeder_cats_list"].append(s)
-                # Note: lead_cat input lives in Lead Finder tab; we still prefill its state here.
                 st.session_state["lead_cat"] = ", ".join(st.session_state["feeder_cats_list"])
                 st.rerun()
         with c2:
@@ -735,16 +758,45 @@ with tab2:
             st.warning("No 'Name' column in the results.")
             name_choice = None
 
+        # One-click outreach
+        st.markdown("#### One-click outreach")
         if name_choice:
-            row = dff[dff["Name"].astype(str) == str(name_choice)].iloc[0].to_dict()
-            st.markdown(f"##### 📍 {row.get('Name','')}")
-            st.markdown(f"{row.get('Address','')}")
-            st.markdown(
-                f"- ⭐ **{row.get('Rating','—')}** ({row.get('Reviews','—')} reviews)\n"
-                f"- 📞 {row.get('Phone','—')}\n"
-                f"- 🌐 {row.get('Website','—')}\n"
-                f"- 🧭 [Open in Google Maps]({row.get('MapsUrl','')})"
-            )
+            lead2 = dff[dff["Name"].astype(str) == str(name_choice)].iloc[0].to_dict()
+            colA, colB = st.columns(2)
+            with colA:
+                if st.button("Draft email", use_container_width=True, key="btn_email"):
+                    body = (
+                        llm(
+                            system="You write friendly B2B outreach for local partnerships.",
+                            prompt=(
+                                f"Draft a short email from a {st.session_state.get('out_persona','Local Professional')} "
+                                f"to {lead2['Name']} ({lead2.get('Website','')}). "
+                                f"Goal: propose a referral partnership. Include a clear CTA. "
+                                f"Keep it 120–150 words."
+                            ),
+                        )
+                        or (
+                            f"Hi {lead2['Name']} team,\n\n"
+                            "I’d love to explore a simple referral partnership. "
+                            "We serve the same customers and can help each other win more business. "
+                            "Could we schedule a 10-minute chat this week?\n\n"
+                            "Best,\n<Your Name>"
+                        )
+                    )
+                    st.code(body)
+            with colB:
+                if st.button("Draft SMS", use_container_width=True, key="btn_sms"):
+                    sms = (
+                        llm(
+                            system="You write concise SMS for local B2B outreach.",
+                            prompt=(
+                                f"Write a friendly 240-character text to {lead2['Name']} "
+                                f"proposing a quick chat about referrals. One clear CTA."
+                            ),
+                        )
+                        or f"Hi {lead2['Name']}! Quick idea: partner on referrals? 10-min chat this week?"
+                    )
+                    st.code(sms)
 
         if MAPS_OK:
             st.markdown("#### Map")
@@ -766,32 +818,6 @@ with tab2:
 
         st.download_button("⬇️ Export CSV", dff[show_cols].to_csv(index=False).encode("utf-8"),
                            "leads.csv", "text/csv")
-
-        st.markdown("#### One-click outreach")
-        if name_choice:
-            lead2 = dff[dff["Name"].astype(str) == str(name_choice)].iloc[0].to_dict()
-            colA, colB = st.columns(2)
-            with colA:
-                if st.button("Draft email", use_container_width=True, key="btn_email"):
-                    body = (llm(
-                        system="You write friendly B2B outreach for local partnerships.",
-                        prompt=(f"Draft a short email from a {st.session_state.get('out_persona','Local Professional')} "
-                                f"to {lead2['Name']} ({lead2.get('Website','')}). "
-                                f"Goal: propose a referral partnership. Include a clear CTA. "
-                                f"Keep it 120–150 words.")
-                    ) or
-                    f"Hi {lead2['Name']} team,\n\nI’d love to explore a simple referral partnership. "
-                    "We serve the same customers and can help each other win more business. "
-                    "Could we schedule a 10-minute chat this week?\n\nBest,\n<Your Name>"))
-                    st.code(body)
-            with colB:
-                if st.button("Draft SMS", use_container_width=True, key="btn_sms"):
-                    sms = (llm(
-                        system="You write concise SMS for local B2B outreach.",
-                        prompt=(f"Write a friendly 240-character text to {lead2['Name']} proposing a quick chat about referrals. "
-                                f"One clear CTA.")
-                    ) or f"Hi {lead2['Name']}! Quick idea: partner on referrals? 10-min chat this week?")
-                    st.code(sms)
 
         if autogpt_url:
             if st.button("Arm AutoGPT: watch for new high-score leads", key="btn_autogpt"):
