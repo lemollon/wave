@@ -1,9 +1,9 @@
 # app.py — Wave — Trends → Leads → Outreach → Weekly Report + (Pro always ON)
-# Changes in this build:
-# - Suggestion buttons + chips render BEFORE the Trend form.
-# - Chip clicks set the target input key and st.rerun() (safe: widget not created yet).
-# - extract_strings() cleans partial tokens.
-# - Pro features always ON; each st.form has exactly one st.form_submit_button().
+# Fixes:
+# - Chips now update widget values via _set_and_rerun() to avoid StreamlitAPIException.
+# - extract_strings() is stricter to filter partial tokens/junk.
+# - Pro features are always ON (no sidebar toggles).
+# - Each st.form(...) has exactly one st.form_submit_button().
 
 import os
 import io
@@ -147,6 +147,8 @@ def inject_css():
             border:1px dashed #2b2f36; border-radius:10px; padding:.6rem .8rem; font-size:.9rem; margin: .5rem 0 1rem 0;
             background:rgba(255,255,255,0.02);
           }
+          /* Optional: nicer tiny tags inside tables */
+          .tag { display:inline-block; padding:.2rem .5rem; border-radius:999px; border:1px solid #2b2f36; margin-right:.3rem; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -175,6 +177,13 @@ def helper_banner():
         """,
         unsafe_allow_html=True,
     )
+
+
+# ---------- Rerun-safe widget update ----------
+def _set_and_rerun(widget_key: str, value: str):
+    """Safely update a widget's session_state value after it exists, then rerun."""
+    st.session_state[widget_key] = value
+    st.rerun()
 
 
 # ---------- LLM suggestion sanitation ----------
@@ -235,26 +244,23 @@ def extract_strings(raw: Any, max_items: int = 24) -> List[str]:
     return cleaned[:max_items]
 
 
-# ------- Chips (run BEFORE form; safe to set widget state then rerun) -------
 def render_chips_and_capture(label: str, suggestions: List[str], key_prefix: str,
-                             state_list_name: str, target_input_key: str):
+                             state_list_name: str, text_input_key: str):
     """
-    Clickable chips that update a maintained list and mirror into the target text input key.
-    This function should run BEFORE the widget with target_input_key is created.
+    Clickable chips that append to a maintained list and mirror into a text input.
+    Uses _set_and_rerun(...) to safely update an already-instantiated widget key.
     """
     if not suggestions:
         return
 
     st.session_state.setdefault(state_list_name, [])
-    st.session_state.setdefault(target_input_key, st.session_state.get(target_input_key, ""))
+    st.session_state.setdefault(text_input_key, st.session_state.get(text_input_key, ""))
 
     st.markdown(f"**{label}**")
     cols = st.columns(min(4, max(1, len(suggestions)//6 + 1)))
 
     def _apply(lst: List[str]):
-        st.session_state[state_list_name] = lst
-        st.session_state[target_input_key] = ", ".join(lst)
-        st.rerun()
+        _set_and_rerun(text_input_key, ", ".join(lst))
 
     for i, s in enumerate(suggestions):
         col = cols[i % len(cols)]
@@ -263,6 +269,7 @@ def render_chips_and_capture(label: str, suggestions: List[str], key_prefix: str
                 lst: List[str] = list(st.session_state.get(state_list_name, []))
                 if s not in lst:
                     lst.append(s)
+                    st.session_state[state_list_name] = lst
                 _apply(lst)
 
     b1, b2, _ = st.columns([1, 1, 6])
@@ -272,9 +279,11 @@ def render_chips_and_capture(label: str, suggestions: List[str], key_prefix: str
             for s in suggestions:
                 if s not in lst:
                     lst.append(s)
+            st.session_state[state_list_name] = lst
             _apply(lst)
     with b2:
         if st.button("Clear", key=f"{key_prefix}_clear"):
+            st.session_state[state_list_name] = []
             _apply([])
 
 
@@ -528,7 +537,32 @@ with tab1:
         )
     st.selectbox("Reddit ranking", ["hot", "top"], index=0, key="reddit_mode")
 
-    # --- SUGGESTION BUTTONS + CHIPS (BEFORE THE FORM) ---
+    # === MAIN FORM (one submit) ===
+    trend_form = st.form(key="trend_form", clear_on_submit=False)
+    with trend_form:
+        niche = st.text_input(
+            "Niche keywords (comma-separated)",
+            "real estate, mortgage, school districts",
+            key="trend_niche",
+            help="Tip: Use the suggestion chips below to auto-fill this box."
+        )
+        city = st.text_input("City", "Katy", key="trend_city")
+        state = st.text_input("State", "TX", key="trend_state")
+        subs = st.text_input(
+            "Reddit subs (comma-separated)",
+            "RealEstate, Austin, personalfinance",
+            key="trend_subs",
+            help="Tip: Use the suggestion chips below to auto-fill this box."
+        )
+        timeframe = st.selectbox(
+            "Google Trends timeframe",
+            ["now 7-d", "now 1-d", "now 30-d", "today 3-m"],
+            index=0,
+            key="trend_timeframe",
+        )
+        submitted = st.form_submit_button("Fetch trends")  # keep simple for max compatibility
+
+    # === AI SUGGESTION BUTTONS (OUTSIDE THE FORM) ===
     colA, colB, colC = st.columns(3)
     with colA:
         if st.button("💡 Suggest keywords", key="btn_suggest_kw"):
@@ -559,6 +593,7 @@ with tab1:
             raw = llm(prompt, system="You suggest feeder businesses for partnerships.", temp=0.3)
             st.session_state["suggested_feeders"] = extract_strings(raw, max_items=24)
 
+    # Render chips (rerun-safe updates to inputs)
     kw_sug = st.session_state.get("suggested_keywords", [])
     if kw_sug:
         render_chips_and_capture("Suggested keywords:", kw_sug, "kw", "niche_keywords_list", "trend_niche")
@@ -570,31 +605,6 @@ with tab1:
     feed_sug = st.session_state.get("suggested_feeders", [])
     if feed_sug:
         render_chips_and_capture("Suggested feeder categories:", feed_sug, "feed", "feeder_cats_list", "lead_cat")
-
-    # --- MAIN FORM (created AFTER chips; safe) ---
-    trend_form = st.form(key="trend_form", clear_on_submit=False)
-    with trend_form:
-        niche = st.text_input(
-            "Niche keywords (comma-separated)",
-            st.session_state.get("trend_niche", "real estate, mortgage, school districts"),
-            key="trend_niche",
-            help="Tip: use the chips above to auto-fill."
-        )
-        city = st.text_input("City", st.session_state.get("trend_city", "Katy"), key="trend_city")
-        state = st.text_input("State", st.session_state.get("trend_state", "TX"), key="trend_state")
-        subs = st.text_input(
-            "Reddit subs (comma-separated)",
-            st.session_state.get("trend_subs", "RealEstate, Austin, personalfinance"),
-            key="trend_subs",
-            help="Tip: use the chips above to auto-fill."
-        )
-        timeframe = st.selectbox(
-            "Google Trends timeframe",
-            ["now 7-d", "now 1-d", "now 30-d", "today 3-m"],
-            index=0,
-            key="trend_timeframe",
-        )
-        submitted = st.form_submit_button("Fetch trends")
 
     # Compute on submit
     if submitted:
