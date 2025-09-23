@@ -1,14 +1,10 @@
 # app.py — Wave — Trends → Leads → Outreach → Weekly Report (Pro always ON)
-# Highlights:
-# - Glossy pill buttons for chips & all buttons via CSS.
-# - Chips render BEFORE the form, update session_state, then st.rerun() (no StreamlitAPIException).
-# - Robust extract_strings() to avoid partial tokens.
-# - Pro features always ON (no sidebar toggles).
-# - Each st.form has exactly one st.form_submit_button().
-# - Fixed unmatched parenthesis in Draft email block.
-# - (NEW) Industry select + seed map keeps keywords, categories, subreddits in sync.
-# - (FIX) Rising Queries table always has columns: keyword, query, value, link (no KeyError).
-# - (FIX) CrewAI now gated on CREW_OK + LCO_OK + OPENAI_API_KEY.
+# Updates:
+# - CrewAI: added expected_output + stricter gating (CREW_OK & LCO_OK & OPENAI_API_KEY).
+# - Outreach Factory & Weekly Report now sync with Industry selection.
+# - Industry dropdown with ~24 seeded industries; Custom still supported.
+# - Rising Queries: table always has keyword|query|value|link, Trends Explore URL primary, Google Search fallback.
+# - No UX changes: glossy chips, rerun, one-submit-per-form preserved.
 
 import os
 import io
@@ -73,7 +69,6 @@ except Exception:
 
 # -------------------- ENV / helpers --------------------
 def _env(k: str, d: str = "") -> str:
-    """Read env first; only touch st.secrets if a secrets.toml exists (avoids Render banner)."""
     v = os.getenv(k)
     if v:
         return v
@@ -140,14 +135,12 @@ def inject_css():
         <style>
           :root { --card-bg:#0e1117; --card-border:#2b2f36; }
 
-          /* Cardy bits */
           .kpi-card {border:1px solid var(--card-border); border-radius:14px; padding:16px 18px; background:var(--card-bg);}
           .kpi-label {font-size:.80rem; opacity:.85; letter-spacing:.2px}
           .kpi-value {font-weight:800; font-size:1.25rem; margin-top:4px}
           .stDataFrame { border:1px solid var(--card-border); border-radius:12px; }
           .stAlert { border-radius:12px; }
 
-          /* GLOSSY pill buttons (affects all st.button & friends, incl. chips) */
           .stButton > button, .stDownloadButton > button, .stFormSubmitButton > button {
             display:inline-block;
             padding:.45rem .9rem;
@@ -168,7 +161,6 @@ def inject_css():
             box-shadow:0 6px 10px rgba(0,0,0,.35), inset 0 1px 2px rgba(255,255,255,.25);
           }
 
-          /* Helper banner */
           .helper-banner {
             border:1px dashed #2b2f36; border-radius:10px; padding:.6rem .8rem; font-size:.9rem; margin:.5rem 0 1rem 0;
             background:rgba(255,255,255,0.02);
@@ -201,22 +193,400 @@ def helper_banner():
         """,
         unsafe_allow_html=True,
     )
+# ---------- Industry seeds (expanded) ----------
+INDUSTRY_SEED_MAP: Dict[str, Dict[str, Any]] = {
+    "Real Estate": {
+        "aliases": ["realtor", "real estate agent", "realty", "broker", "housing market"],
+        "seed_keywords": [
+            "real estate", "homes for sale", "mortgage rates", "open houses", "school districts",
+            "first time homebuyer", "property tax"
+        ],
+        "feeder_categories": [
+            "apartment complex", "moving company", "mortgage broker", "home builder", "property management",
+            "home inspector", "title company"
+        ],
+        "subreddits": ["RealEstate", "HomeImprovement", "personalfinance", "FirstTimeHomeBuyer", "RealEstateTechnology"],
+        "persona": "Real Estate Agent",
+        "target": "Apartment complex managers in {city}, {state}"
+    },
+    "Mortgage & Lending": {
+        "aliases": ["mortgage", "lender", "mortgages", "loan officer"],
+        "seed_keywords": [
+            "mortgage pre approval", "refinance rates", "FHA loan", "VA loan", "conventional loan",
+            "closing costs", "down payment assistance"
+        ],
+        "feeder_categories": [
+            "real estate office", "title company", "home builder", "financial advisor", "credit repair",
+            "insurance agency", "accountant"
+        ],
+        "subreddits": ["Mortgages", "RealEstate", "personalfinance", "FirstTimeHomeBuyer", "HomeImprovement"],
+        "persona": "Mortgage Broker",
+        "target": "Prospective homebuyers and realtors in {city}, {state}"
+    },
+    "Property Management": {
+        "aliases": ["landlord services", "rental management", "multifamily management"],
+        "seed_keywords": [
+            "property management", "tenant screening", "rent collection", "maintenance services",
+            "lease agreements", "eviction process"
+        ],
+        "feeder_categories": [
+            "real estate office", "apartment complex", "cleaning services", "handyman",
+            "appliance repair", "landscaping", "security systems"
+        ],
+        "subreddits": ["Landlord", "RealEstate", "propertymanagement", "legaladvice", "HomeImprovement"],
+        "persona": "Property Manager",
+        "target": "Landlords and multifamily owners in {city}, {state}"
+    },
+    "Home Improvement / Contractors": {
+        "aliases": ["contractor", "roofing", "hvac", "plumbing", "electrician", "remodeling", "renovation"],
+        "seed_keywords": [
+            "roof repair", "HVAC service", "plumber near me", "electrician near me",
+            "kitchen remodel", "bathroom remodel", "home renovation"
+        ],
+        "feeder_categories": [
+            "real estate office", "home inspector", "property management", "hardware store",
+            "apartment complex", "insurance agency"
+        ],
+        "subreddits": ["HomeImprovement", "DIY", "HVAC", "Plumbing", "electricians"],
+        "persona": "Home Services Contractor",
+        "target": "Homeowners in {city}, {state} planning repairs or upgrades"
+    },
+    "Fitness / Gyms": {
+        "aliases": ["gym", "personal training", "crossfit", "yoga studio", "pilates studio"],
+        "seed_keywords": [
+            "gym near me", "personal trainer", "weight loss", "HIIT", "nutrition coaching", "group fitness",
+            "yoga classes"
+        ],
+        "feeder_categories": [
+            "physical therapy", "chiropractor", "sports clubs", "supplement store",
+            "healthy cafe", "athletic wear shop"
+        ],
+        "subreddits": ["fitness", "loseit", "nutrition", "bodyweightfitness", "xxfitness"],
+        "persona": "Gym Owner",
+        "target": "Local fitness enthusiasts in {city}, {state}"
+    },
+    "Healthcare (Primary Care)": {
+        "aliases": ["family medicine", "internal medicine", "pcp", "primary care physician"],
+        "seed_keywords": [
+            "primary care doctor", "annual physical", "urgent care vs primary care",
+            "telehealth primary care", "accepting new patients"
+        ],
+        "feeder_categories": [
+            "pharmacy", "urgent care", "physical therapy", "imaging center", "labs", "insurance agency"
+        ],
+        "subreddits": ["medicine", "AskDocs", "Health", "nutrition", "fitness"],
+        "persona": "Primary Care Clinic",
+        "target": "Families and professionals in {city}, {state}"
+    },
+    "Dental": {
+        "aliases": ["dentist", "orthodontist", "dental clinic", "oral health"],
+        "seed_keywords": [
+            "dentist near me", "teeth whitening", "dental implants", "invisalign", "root canal",
+            "kids dentist", "dental emergency"
+        ],
+        "feeder_categories": [
+            "orthodontist", "oral surgeon", "pediatric dentist", "dental hygienist",
+            "insurance agency", "x-ray imaging center"
+        ],
+        "subreddits": ["Dentistry", "askdentists", "Health"],
+        "persona": "Dental Practice",
+        "target": "Families in {city}, {state} needing dental care"
+    },
+    "Chiropractic / Physical Therapy": {
+        "aliases": ["chiropractor", "pt clinic", "physiotherapy", "sports rehab"],
+        "seed_keywords": [
+            "chiropractor near me", "back pain relief", "physical therapy exercises",
+            "sports injury rehab", "posture correction"
+        ],
+        "feeder_categories": [
+            "gym", "orthopedics clinic", "massage therapy", "personal training", "yoga studio"
+        ],
+        "subreddits": ["Chiropractic", "physicaltherapy", "Fitness", "injuries"],
+        "persona": "Chiropractic & PT Clinic",
+        "target": "Active adults and athletes in {city}, {state}"
+    },
+    "Beauty / Salon / MedSpa": {
+        "aliases": ["salon", "spa", "medspa", "aesthetics", "cosmetic clinic"],
+        "seed_keywords": [
+            "hair salon", "lash extensions", "botox near me", "facials", "laser hair removal",
+            "brow lamination", "skin rejuvenation"
+        ],
+        "feeder_categories": [
+            "bridal boutique", "photography studio", "makeup artist", "nail salon",
+            "fitness studio", "fashion boutique"
+        ],
+        "subreddits": ["SkincareAddiction", "MakeupAddiction", "Esthetics", "HaircareScience"],
+        "persona": "MedSpa & Beauty Studio",
+        "target": "Local professionals and bridal clients in {city}, {state}"
+    },
+    "Restaurants / Cafes": {
+        "aliases": ["restaurant", "coffee shop", "cafe", "bistro"],
+        "seed_keywords": [
+            "best restaurants in {city}", "coffee near me", "brunch spots", "happy hour",
+            "gluten free restaurant", "family friendly dining"
+        ],
+        "feeder_categories": [
+            "event venue", "food bloggers", "influencer agency", "food delivery",
+            "photo studio", "farmers market"
+        ],
+        "subreddits": ["Cooking", "FoodPorn", "Coffee", "barista"],
+        "persona": "Restaurant Owner",
+        "target": "Local foodies and families in {city}, {state}"
+    },
+    "Automotive Services": {
+        "aliases": ["auto repair", "mechanic", "detailing", "car wash", "tire shop"],
+        "seed_keywords": [
+            "auto repair near me", "oil change", "brake service", "car detailing",
+            "tire rotation", "check engine light"
+        ],
+        "feeder_categories": [
+            "car dealerships", "insurance agency", "car rental", "towing service", "body shop"
+        ],
+        "subreddits": ["Cartalk", "mechanicadvice", "AutoDetailing", "whatcarshouldIbuy"],
+        "persona": "Auto Repair Shop",
+        "target": "Commuters and families in {city}, {state}"
+    },
+    "Legal Services": {
+        "aliases": ["law firm", "injury lawyer", "family law", "immigration attorney", "estate planning"],
+        "seed_keywords": [
+            "personal injury lawyer", "family law attorney", "immigration lawyer",
+            "will and trust", "DUI defense", "small business lawyer"
+        ],
+        "feeder_categories": [
+            "chiropractor", "therapy center", "insurance agent", "accountant",
+            "community centers", "nonprofits"
+        ],
+        "subreddits": ["legaladvice", "law", "immigration"],
+        "persona": "Law Firm",
+        "target": "Local clients seeking legal help in {city}, {state}"
+    },
+    "Education / Tutoring": {
+        "aliases": ["tutoring", "test prep", "after school", "learning center"],
+        "seed_keywords": [
+            "math tutor", "SAT prep", "reading tutoring", "study skills", "college counseling",
+            "homeschool support"
+        ],
+        "feeder_categories": [
+            "schools", "PTA groups", "libraries", "community centers", "after-school programs"
+        ],
+        "subreddits": ["Teachers", "education", "learnpython", "Anxiety"],
+        "persona": "Tutoring Center",
+        "target": "Parents and students in {city}, {state}"
+    },
+    "Childcare / Daycare": {
+        "aliases": ["daycare", "preschool", "child care", "early learning"],
+        "seed_keywords": [
+            "daycare near me", "preschool programs", "infant care", "after-school care",
+            "Montessori preschool", "licensed childcare"
+        ],
+        "feeder_categories": [
+            "pediatrician", "family therapist", "PTA groups", "community centers", "play cafes"
+        ],
+        "subreddits": ["Parenting", "Mommit", "preschool"],
+        "persona": "Childcare Center",
+        "target": "Parents of young children in {city}, {state}"
+    },
+    "Pet Services": {
+        "aliases": ["veterinarian", "pet grooming", "dog daycare", "dog training"],
+        "seed_keywords": [
+            "vet near me", "pet grooming", "dog daycare", "spay and neuter", "puppy training",
+            "pet vaccinations"
+        ],
+        "feeder_categories": [
+            "pet stores", "dog parks", "animal shelters", "breeders", "pet photographers"
+        ],
+        "subreddits": ["dogs", "cats", "puppy101", "petcare"],
+        "persona": "Veterinary & Pet Services",
+        "target": "Pet owners in {city}, {state}"
+    },
+    "Insurance / Financial Advisory": {
+        "aliases": ["insurance agent", "financial planner", "life insurance", "medicare"],
+        "seed_keywords": [
+            "auto insurance quotes", "home insurance", "life insurance", "retirement planning",
+            "medicare advantage"
+        ],
+        "feeder_categories": [
+            "real estate office", "mortgage broker", "car dealership", "accountant", "estate planning attorneys"
+        ],
+        "subreddits": ["personalfinance", "FinancialPlanning", "investing"],
+        "persona": "Insurance & Financial Advisor",
+        "target": "Families and small business owners in {city}, {state}"
+    },
+    "E-commerce / DTC": {
+        "aliases": ["online store", "shopify", "woocommerce", "drop shipping", "amazon fba"],
+        "seed_keywords": [
+            "shopify apps", "conversion rate", "product reviews", "influencer marketing",
+            "email flows", "post purchase upsell"
+        ],
+        "feeder_categories": [
+            "photo studio", "fulfillment center", "last-mile delivery", "returns service", "influencer agency"
+        ],
+        "subreddits": ["ecommerce", "shopify", "Entrepreneur", "PPC", "SEO"],
+        "persona": "E-commerce Brand",
+        "target": "Shoppers and influencers around {city}, {state}"
+    },
+    "SaaS / B2B Software": {
+        "aliases": ["b2b saas", "software startup", "cloud platform", "product-led growth"],
+        "seed_keywords": [
+            "b2b software", "crm tools", "marketing automation", "customer success",
+            "data analytics", "AI features"
+        ],
+        "feeder_categories": [
+            "digital agency", "implementation partner", "system integrator",
+            "coworking space", "accelerator"
+        ],
+        "subreddits": ["SaaS", "Entrepreneur", "startup", "growthhacking", "UserExperience"],
+        "persona": "SaaS Founder",
+        "target": "Local SMB operators and tech buyers in {city}, {state}"
+    },
+    "IT / Tech Support / Device Repair": {
+        "aliases": ["computer repair", "iphone repair", "managed services", "MSP"],
+        "seed_keywords": [
+            "computer repair near me", "iphone screen repair", "managed IT services", "data recovery",
+            "network setup", "cybersecurity"
+        ],
+        "feeder_categories": [
+            "coworking space", "SMB hubs", "electronics stores", "schools", "municipal offices"
+        ],
+        "subreddits": ["techsupport", "sysadmin", "iphone", "buildapc"],
+        "persona": "IT Services & Repair",
+        "target": "Local SMBs and residents in {city}, {state}"
+    },
+    "Travel & Hospitality": {
+        "aliases": ["hotel", "vacation rental", "airbnb host", "tour operator"],
+        "seed_keywords": [
+            "hotels in {city}", "vacation rental", "things to do in {city}", "best restaurants {city}",
+            "family friendly attractions"
+        ],
+        "feeder_categories": [
+            "event venues", "restaurants", "tourist centers", "travel agents", "transport providers"
+        ],
+        "subreddits": ["travel", "solotravel", "digitalnomad"],
+        "persona": "Hospitality Operator",
+        "target": "Visitors and groups coming to {city}, {state}"
+    },
+    "Events / Venues": {
+        "aliases": ["event space", "wedding venue", "banquet hall", "event planner"],
+        "seed_keywords": [
+            "wedding venues {city}", "event space rental {city}", "corporate event venue",
+            "party venues", "wedding planners"
+        ],
+        "feeder_categories": [
+            "photography studio", "catering", "bridal boutique", "florist", "DJ services"
+        ],
+        "subreddits": ["weddingplanning", "events", "EventProfs"],
+        "persona": "Event Venue",
+        "target": "Couples and businesses planning events in {city}, {state}"
+    },
+    "Landscaping & Lawn Care": {
+        "aliases": ["landscaper", "lawn mowing", "tree trimming", "gardening"],
+        "seed_keywords": [
+            "lawn care near me", "landscaping design", "tree service", "irrigation repair",
+            "seasonal cleanup"
+        ],
+        "feeder_categories": [
+            "HOA offices", "property management", "real estate offices", "garden centers"
+        ],
+        "subreddits": ["lawncare", "gardening"],
+        "persona": "Landscaping Company",
+        "target": "Homeowners and HOAs in {city}, {state}"
+    },
+    "Cleaning Services": {
+        "aliases": ["house cleaning", "maid service", "janitorial", "commercial cleaning"],
+        "seed_keywords": [
+            "house cleaning near me", "deep clean service", "move out cleaning",
+            "office cleaning", "post construction cleaning"
+        ],
+        "feeder_categories": [
+            "property management", "apartment complexes", "real estate offices", "Airbnb hosts"
+        ],
+        "subreddits": ["CleaningTips", "HomeImprovement", "AirBnB"],
+        "persona": "Cleaning Services",
+        "target": "Homeowners and small offices in {city}, {state}"
+    },
+    "Nonprofit / Community Orgs": {
+        "aliases": ["charity", "ngo", "community center", "church group"],
+        "seed_keywords": [
+            "donations {city}", "volunteer opportunities {city}", "community programs",
+            "youth mentorship", "food pantry"
+        ],
+        "feeder_categories": [
+            "churches", "schools", "libraries", "local businesses", "media outlets"
+        ],
+        "subreddits": ["nonprofit", "volunteer", "community"],
+        "persona": "Nonprofit Director",
+        "target": "Local donors and volunteers in {city}, {state}"
+    },
+    "Local Retail / Boutiques": {
+        "aliases": ["boutique", "gift shop", "thrift store", "bookstore"],
+        "seed_keywords": [
+            "boutique near me", "local gift ideas", "handmade goods", "holiday shopping",
+            "grand opening"
+        ],
+        "feeder_categories": [
+            "event venues", "influencer agency", "photo studio", "coffee shops", "farmer markets"
+        ],
+        "subreddits": ["Retail", "Entrepreneur", "marketing"],
+        "persona": "Retail Boutique",
+        "target": "Shoppers in {city}, {state}"
+    },
+    "Custom": {
+        "aliases": [],
+        "seed_keywords": [],
+        "feeder_categories": [],
+        "subreddits": [],
+        "persona": "Local Professional",
+        "target": "Decision-makers in {city}, {state}"
+    }
+}
 
 
-# ---------- Warm-up (optional) ----------
-def warm_up_render(url: str, timeout: int = 10) -> str:
-    if not url:
-        return "No wake URL set. Add RENDER_WAKE_URL to your environment."
-    try:
-        r = requests.head(url, timeout=timeout, allow_redirects=True)
-        if 200 <= r.status_code < 400:
-            return f"Warmed! ({r.status_code})"
-        r = requests.get(url, timeout=timeout)
-        return f"Warmed! ({r.status_code})" if 200 <= r.status_code < 400 else f"Service responded: {r.status_code}"
-    except Exception as e:
-        return f"Warm-up failed: {e}"
+def _normalize_industry_label(label: str) -> str:
+    """Return canonical label from INDUSTRY_SEED_MAP based on label or alias; default 'Custom'."""
+    if not label:
+        return "Custom"
+    s = label.strip().lower()
+    for canon, cfg in INDUSTRY_SEED_MAP.items():
+        if s == canon.lower():
+            return canon
+        for alias in cfg.get("aliases", []):
+            if s == alias.lower():
+                return canon
+    return "Custom"
 
 
+def _apply_industry_to_state(canon_label: str):
+    """Sync session state from the industry seed map and reset caches."""
+    cfg = INDUSTRY_SEED_MAP.get(canon_label, INDUSTRY_SEED_MAP["Custom"])
+    city = st.session_state.get("trend_city", "Katy")
+    state = st.session_state.get("trend_state", "TX")
+
+    # Sync keywords
+    kw = [k.replace("{city}", city).replace("{state}", state) for k in cfg.get("seed_keywords", [])]
+    st.session_state["niche_keywords_list"] = list(kw)
+    st.session_state["trend_niche"] = ", ".join(kw)
+
+    # Sync feeder categories
+    fc = cfg.get("feeder_categories", [])
+    st.session_state["feeder_cats_list"] = list(fc)
+    st.session_state["lead_cat"] = ", ".join(fc) if fc else st.session_state.get("lead_cat", "")
+
+    # Sync subreddits
+    sr = cfg.get("subreddits", [])
+    st.session_state["subreddits_list"] = list(sr)
+    st.session_state["trend_subs"] = ", ".join(sr)
+
+    # Outreach / Report defaults
+    persona = cfg.get("persona", "Local Professional")
+    target = cfg.get("target", "Decision-makers in {city}, {state}").format(city=city, state=state)
+    st.session_state["out_persona"] = persona
+    st.session_state["out_target"] = target
+    st.session_state["report_biz"] = persona
+    st.session_state["report_city"] = city
+
+    # Reset caches so UI reflects the new industry immediately
+    st.session_state["trend_data_cache"] = None
+    st.session_state["lead_data_cache"] = None
 # ---------- LLM suggestion sanitation ----------
 _JSON_FENCE_RE = re.compile(r"^```+|```+$", flags=re.MULTILINE)
 _QUOTES_RE = re.compile(r"(^[\"'`\\s]+|[\"'`\\s]+$)")
@@ -282,7 +652,6 @@ def google_trends_rising(keywords: List[str], geo="US", timeframe="now 7-d") -> 
     try:
         from pytrends.request import TrendReq
     except Exception:
-        # Return empty but schema-stable
         return {"source": "google_trends", "error": "pytrends not installed", "rising": [], "iot": {}}
 
     pytrends = TrendReq(hl="en-US", tz=360)
@@ -295,7 +664,7 @@ def google_trends_rising(keywords: List[str], geo="US", timeframe="now 7-d") -> 
             if not iot.empty:
                 ser = iot[kw].reset_index().rename(columns={kw: "interest", "date": "ts"})
                 ser["keyword"] = kw
-                ser["ts"] = ser["ts"].astype(str)  # JSON-safe
+                ser["ts"] = ser["ts"].astype(str)
                 iot_map[kw] = ser.to_dict(orient="records")
 
             rq = pytrends.related_queries()
@@ -304,7 +673,6 @@ def google_trends_rising(keywords: List[str], geo="US", timeframe="now 7-d") -> 
                 for _, row in rising_df.iterrows():
                     qry = row.get("query")
                     val = int(row.get("value", 0) or 0)
-                    # Prefer Trends Explore link; fallback to Google search if building fails
                     link = _trends_explore_link(qry, geo) or _google_search_link(qry)
                     rising_all.append({
                         "keyword": kw,
@@ -313,15 +681,14 @@ def google_trends_rising(keywords: List[str], geo="US", timeframe="now 7-d") -> 
                         "link": link,
                     })
             else:
-                # No rising data; still append a placeholder so UI stays stable (optional)
+                # no rising; append schema-stable placeholder
                 rising_all.append({
                     "keyword": kw,
                     "query": None,
                     "value": 0,
                     "link": "",
                 })
-        except Exception as e:
-            # Error row with full schema
+        except Exception:
             rising_all.append({
                 "keyword": kw,
                 "query": None,
@@ -520,79 +887,6 @@ st.session_state.setdefault("trend_state", "TX")
 st.session_state.setdefault("trend_subs", "RealEstate, Austin, personalfinance")
 st.session_state.setdefault("industry_selected", "Custom")
 
-# ----------------- Industry seed map (NEW) -----------------
-INDUSTRY_SEED_MAP = {
-    # Canonical label : seeds
-    "Real Estate": {
-        "aliases": ["realtor", "real estate agent", "realty", "broker"],
-        "seed_keywords": ["real estate", "homes for sale", "mortgage rates", "open houses", "school districts"],
-        "feeder_categories": ["apartment complex", "moving company", "mortgage broker", "home builder", "property management"],
-        "subreddits": ["RealEstate", "HomeImprovement", "personalfinance", "FirstTimeHomeBuyer", "RealEstateTechnology"]
-    },
-    "Fitness": {
-        "aliases": ["gym", "personal training", "crossfit"],
-        "seed_keywords": ["gym near me", "personal trainer", "weight loss", "HIIT", "nutrition coaching"],
-        "feeder_categories": ["physical therapy", "chiropractor", "sports clubs", "supplement store", "healthy cafe"],
-        "subreddits": ["fitness", "loseit", "nutrition", "bodyweightfitness", "xxfitness"]
-    },
-    "SaaS": {
-        "aliases": ["software", "b2b saas", "startup"],
-        "seed_keywords": ["b2b software", "crm tools", "marketing automation", "customer success", "data analytics"],
-        "feeder_categories": ["digital agency", "implementation partner", "system integrator", "coworking space", "accelerator"],
-        "subreddits": ["SaaS", "Entrepreneur", "startup", "growthhacking", "UserExperience"]
-    },
-    "E-commerce": {
-        "aliases": ["eccom", "online store", "shopify"],
-        "seed_keywords": ["shopify apps", "conversion rate", "product reviews", "influencer marketing", "dropshipping"],
-        "feeder_categories": ["photo studio", "fulfillment center", "last-mile delivery", "returns service", "influencer agency"],
-        "subreddits": ["ecommerce", "shopify", "Entrepreneur", "PPC", "SEO"]
-    },
-    "Local Services": {
-        "aliases": ["plumber", "electrician", "roofing", "contractor"],
-        "seed_keywords": ["local marketing", "near me searches", "google reviews", "home services", "lead generation"],
-        "feeder_categories": ["property management", "real estate office", "insurance agency", "home warranty", "hardware store"],
-        "subreddits": ["smallbusiness", "marketing", "SEO", "PPC", "AskMarketing"]
-    },
-    "Custom": {
-        "aliases": [],
-        "seed_keywords": [],
-        "feeder_categories": [],
-        "subreddits": []
-    }
-}
-
-def _normalize_industry_label(label: str) -> str:
-    if not label:
-        return "Custom"
-    s = label.strip().lower()
-    for canon, cfg in INDUSTRY_SEED_MAP.items():
-        if s == canon.lower():
-            return canon
-        for alias in cfg.get("aliases", []):
-            if s == alias.lower():
-                return canon
-    return "Custom"
-
-def _apply_industry_to_state(canon_label: str):
-    """Sync session state from the industry seed map and reset caches."""
-    cfg = INDUSTRY_SEED_MAP.get(canon_label, INDUSTRY_SEED_MAP["Custom"])
-    # Sync keywords
-    kw = cfg.get("seed_keywords", [])
-    st.session_state["niche_keywords_list"] = list(kw)
-    st.session_state["trend_niche"] = ", ".join(kw)
-    # Sync feeder categories
-    fc = cfg.get("feeder_categories", [])
-    st.session_state["feeder_cats_list"] = list(fc)
-    st.session_state["lead_cat"] = ", ".join(fc) if fc else st.session_state.get("lead_cat", "")
-    # Sync subreddits
-    sr = cfg.get("subreddits", [])
-    st.session_state["subreddits_list"] = list(sr)
-    st.session_state["trend_subs"] = ", ".join(sr)
-    # Reset caches so UI reflects the new industry immediately
-    st.session_state["trend_data_cache"] = None
-    st.session_state["lead_data_cache"] = None
-
-
 st.title("🌊 Wave — AI Growth Team (Pro)")
 st.caption("Trends → Leads → Outreach (+ LangChain, LangGraph, CrewAI).")
 
@@ -612,10 +906,8 @@ with tab1:
             "- An **AI market summary** and post ideas\n"
         )
 
-    # (NEW) Industry selector — keeps suggestions in sync
-    industry_options = list(INDUSTRY_SEED_MAP.keys())
-    # Prefer showing Custom at end for UX
-    industry_options = [x for x in industry_options if x != "Custom"] + ["Custom"]
+    # Industry selector — keeps suggestions in sync
+    industry_options = [k for k in INDUSTRY_SEED_MAP.keys() if k != "Custom"] + ["Custom"]
     prev_ind = st.session_state.get("industry_selected", "Custom")
     ind = st.selectbox("Industry", options=industry_options, index=industry_options.index(prev_ind))
     if ind != prev_ind:
@@ -623,7 +915,7 @@ with tab1:
         _apply_industry_to_state(ind)
         st.rerun()
 
-    # 1) SUGGESTION BUTTONS + GLOSSY CHIPS (BEFORE the form)
+    # Suggestion buttons + glossy chips (BEFORE the form)
     colA, colB, colC = st.columns(3)
     with colA:
         if st.button("💡 Suggest keywords", key="btn_suggest_kw"):
@@ -732,7 +1024,7 @@ with tab1:
 
     st.selectbox("Reddit ranking", ["hot", "top"], index=0, key="reddit_mode")
 
-    # 2) THE FORM (after chips; safe to read state)
+    # Form (after chips; safe to read state)
     trend_form = st.form(key="trend_form", clear_on_submit=False)
     with trend_form:
         niche = st.text_input("Niche keywords (comma-separated)",
@@ -746,7 +1038,6 @@ with tab1:
                                  index=0, key="trend_timeframe")
         submitted = st.form_submit_button("Fetch trends")
 
-    # Compute on submit
     if submitted:
         keywords = [s.strip() for s in st.session_state.trend_niche.split(",") if s.strip()]
         sub_list = [s.strip().lstrip("r/") for s in st.session_state.trend_subs.split(",") if s.strip()]
@@ -763,7 +1054,7 @@ with tab1:
         st.info("Enter your niche/city and click **Fetch trends**.")
     else:
         rising = pd.DataFrame(data.get("google_trends", {}).get("rising", []))
-        # (NEW) Defensive guard: ensure required columns exist with correct types
+        # Defensive guard: ensure required columns exist
         for col, default in (("keyword", ""), ("query", ""), ("value", 0), ("link", "")):
             if col not in rising.columns:
                 rising[col] = default
@@ -816,9 +1107,7 @@ with tab1:
                     f"Then propose 3 ride-the-wave post ideas. Data:\n{json.dumps(sample)}")
         ) or "Add OPENAI_API_KEY to enable AI-written summaries."
         st.info(summary)
-
-
-# ===================== LEAD FINDER =====================
+        # ===================== LEAD FINDER =====================
 with tab2:
     helper_banner()
     st.subheader("Lead Finder — Nearby partners & feeder businesses")
@@ -970,9 +1259,10 @@ with tab3:
 
     c1, c2 = st.columns(2)
     with c1:
-        persona = st.text_input("Your business type", st.session_state.get("out_persona", "Real Estate Agent"),
+        persona = st.text_input("Your business type", st.session_state.get("out_persona", "Local Professional"),
                                 key="out_persona")
-        target = st.text_input("Target audience", "Apartment complex managers in Katy, TX", key="out_target")
+        target = st.text_input("Target audience", st.session_state.get("out_target", "Decision-makers in Katy, TX"),
+                               key="out_target")
     with c2:
         tone = st.selectbox("Tone", ["Friendly", "Professional", "Hype"], index=0, key="out_tone")
         touches = st.slider("Number of touches", 3, 6, 3, key="out_touches")
@@ -1013,8 +1303,8 @@ with tab4:
     st.subheader("Weekly Output (PDF/DOCX-ready text)")
     st.caption("Combines Trend hooks + Leads + Outreach into a single narrative.")
 
-    biz = st.text_input("Business type", st.session_state.get("out_persona", "Real Estate Agent"), key="report_biz")
-    rcity = st.text_input("City for report", st.session_state.get("trend_city", "Katy"), key="report_city")
+    biz = st.text_input("Business type", st.session_state.get("report_biz", st.session_state.get("out_persona", "Local Professional")), key="report_biz")
+    rcity = st.text_input("City for report", st.session_state.get("report_city", st.session_state.get("trend_city", "Katy")), key="report_city")
     date = st.date_input("Week of", dt.date.today(), key="report_date")
 
     if st.button("Build Weekly Report", key="report_build"):
@@ -1023,13 +1313,13 @@ with tab4:
         **Week of:** {date}
 
         ## 1) Lead Finder — where your next clients are
-        - Pull feeder businesses (apartments, movers, mortgage brokers).
+        - Pull feeder businesses relevant to {biz} (e.g., apartments, movers, complementary providers).
         - Sort by **Actionability Score**; call high-scoring leads first.
         - Use one-click outreach for fast wins.
 
         ## 2) Trend Rider — ride what's hot
         - Look for rising searches (Google Trends) & hot Reddit threads.
-        - Publish 3 posts that hit the trending questions this week.
+        - Publish 3 posts that hit the trending questions this week for {rcity}.
 
         ## 3) Outreach Factory — send this today
         - 3-touch sequence ready (TXT/DOCX).
@@ -1137,33 +1427,41 @@ with tab5:
 
     # CrewAI Growth Crew
     st.markdown("### CrewAI Growth Crew (ON)")
-    # (FIX) Proper gating requires CrewAI + langchain_openai + OPENAI_API_KEY
+    # Proper gating requires CrewAI + langchain_openai + OPENAI_API_KEY
     if not (CREW_OK and LCO_OK and OPENAI_API_KEY):
         st.warning("CrewAI not installed, langchain_openai missing, or OPENAI_API_KEY missing.")
     else:
-        biz = st.text_input("Business", st.session_state.get("out_persona", "Real Estate Agent"), key="crew_biz")
-        niche = st.text_input("Niche focus", "Relocation in Katy, TX", key="crew_niche")
+        biz = st.text_input("Business", st.session_state.get("out_persona", "Local Professional"), key="crew_biz")
+        niche = st.text_input("Niche focus", f"{st.session_state.get('industry_selected','Custom')} in {st.session_state.get('trend_city','Katy')}, {st.session_state.get('trend_state','TX')}", key="crew_niche")
         if st.button("Run Growth Crew", key="crew_run"):
-            researcher = Agent(
-                role="Market Researcher",
-                goal="Find insights & angles that will convert for a local SMB.",
-                backstory="You love concise facts and actionable takeaways.",
-                allow_delegation=False,
-                verbose=False,
-                llm=ChatOpenAI(model="gpt-4o-mini", temperature=0.1, api_key=OPENAI_API_KEY),
-            )
-            writer = Agent(
-                role="Copywriter",
-                goal="Write a crisp one-pager a business owner can use today.",
-                backstory="You are crisp, persuasive, and practical.",
-                allow_delegation=False,
-                verbose=False,
-                llm=ChatOpenAI(model="gpt-4o-mini", temperature=0.3, api_key=OPENAI_API_KEY),
-            )
-            t1 = Task(description=f"Summarize 5 bullet insights for {biz} ({niche}). Provide sources if relevant.", agent=researcher)
-            t2 = Task(description="Write a 1-page brief with headline, 3 bullets, 1 CTA. Make it print-friendly.", agent=writer)
-            crew = Crew(agents=[researcher, writer], tasks=[t1, t2])
             try:
+                researcher = Agent(
+                    role="Market Researcher",
+                    goal="Find insights & angles that will convert for a local SMB.",
+                    backstory="You love concise facts and actionable takeaways.",
+                    allow_delegation=False,
+                    verbose=False,
+                    llm=ChatOpenAI(model="gpt-4o-mini", temperature=0.1, api_key=OPENAI_API_KEY),
+                )
+                writer = Agent(
+                    role="Copywriter",
+                    goal="Write a crisp one-pager a business owner can use today.",
+                    backstory="You are crisp, persuasive, and practical.",
+                    allow_delegation=False,
+                    verbose=False,
+                    llm=ChatOpenAI(model="gpt-4o-mini", temperature=0.3, api_key=OPENAI_API_KEY),
+                )
+                t1 = Task(
+                    description=f"Summarize 5 bullet insights for {biz} ({niche}). Provide sources if relevant.",
+                    agent=researcher,
+                    expected_output="A bullet list of exactly 5 concise market insights for the specified business and niche, each with a brief source note if available."
+                )
+                t2 = Task(
+                    description="Write a 1-page brief with headline, 3 bullets, 1 CTA. Make it print-friendly.",
+                    agent=writer,
+                    expected_output="One page of plain text: a strong headline, exactly 3 punchy bullets, and a single clear call-to-action."
+                )
+                crew = Crew(agents=[researcher, writer], tasks=[t1, t2])
                 result = crew.kickoff()
             except Exception as e:
                 result = f"(CrewAI runtime error: {e})"
