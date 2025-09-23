@@ -6,6 +6,9 @@
 # - Pro features always ON (no sidebar toggles).
 # - Each st.form has exactly one st.form_submit_button().
 # - Fixed unmatched parenthesis in Draft email block.
+# - (NEW) Industry select + seed map keeps keywords, categories, subreddits in sync.
+# - (FIX) Rising Queries table always has columns: keyword, query, value, link (no KeyError).
+# - (FIX) CrewAI now gated on CREW_OK + LCO_OK + OPENAI_API_KEY.
 
 import os
 import io
@@ -258,13 +261,33 @@ def extract_strings(raw: Any, max_items: int = 24) -> List[str]:
 
 
 # --------------------- Trends helpers --------------------
+def _trends_explore_link(query: str, geo: str = "US") -> str:
+    q = str(query or "").strip()
+    if not q:
+        return ""
+    try:
+        from urllib.parse import quote
+        return f"https://trends.google.com/trends/explore?geo={geo}&q={quote(q)}"
+    except Exception:
+        return f"https://www.google.com/search?q={q.replace(' ', '+')}"
+
+def _google_search_link(query: str) -> str:
+    q = str(query or "").strip()
+    if not q:
+        return ""
+    return f"https://www.google.com/search?q={q.replace(' ', '+')}"
+
 def google_trends_rising(keywords: List[str], geo="US", timeframe="now 7-d") -> Dict:
+    """Return dict with 'rising' rows that ALWAYS contain: keyword, query, value, link."""
     try:
         from pytrends.request import TrendReq
     except Exception:
+        # Return empty but schema-stable
         return {"source": "google_trends", "error": "pytrends not installed", "rising": [], "iot": {}}
+
     pytrends = TrendReq(hl="en-US", tz=360)
     rising_all, iot_map = [], {}
+
     for kw in keywords[:6]:
         try:
             pytrends.build_payload([kw], timeframe=timeframe, geo=geo)
@@ -274,18 +297,38 @@ def google_trends_rising(keywords: List[str], geo="US", timeframe="now 7-d") -> 
                 ser["keyword"] = kw
                 ser["ts"] = ser["ts"].astype(str)  # JSON-safe
                 iot_map[kw] = ser.to_dict(orient="records")
+
             rq = pytrends.related_queries()
             if kw in rq and rq[kw].get("rising") is not None:
                 rising_df = rq[kw]["rising"].head(10)
                 for _, row in rising_df.iterrows():
+                    qry = row.get("query")
+                    val = int(row.get("value", 0) or 0)
+                    # Prefer Trends Explore link; fallback to Google search if building fails
+                    link = _trends_explore_link(qry, geo) or _google_search_link(qry)
                     rising_all.append({
                         "keyword": kw,
-                        "query": row.get("query"),
-                        "value": int(row.get("value", 0) or 0),
-                        "link": f"https://www.google.com/search?q={str(row.get('query','')).replace(' ', '+')}",
+                        "query": qry,
+                        "value": val,
+                        "link": link,
                     })
+            else:
+                # No rising data; still append a placeholder so UI stays stable (optional)
+                rising_all.append({
+                    "keyword": kw,
+                    "query": None,
+                    "value": 0,
+                    "link": "",
+                })
         except Exception as e:
-            rising_all.append({"keyword": kw, "query": None, "value": 0, "error": str(e)})
+            # Error row with full schema
+            rising_all.append({
+                "keyword": kw,
+                "query": None,
+                "value": 0,
+                "link": "",
+            })
+
     return {"source": "google_trends", "rising": rising_all, "iot": iot_map}
 
 
@@ -475,6 +518,80 @@ st.session_state.setdefault("trend_niche", "real estate, mortgage, school distri
 st.session_state.setdefault("trend_city", "Katy")
 st.session_state.setdefault("trend_state", "TX")
 st.session_state.setdefault("trend_subs", "RealEstate, Austin, personalfinance")
+st.session_state.setdefault("industry_selected", "Custom")
+
+# ----------------- Industry seed map (NEW) -----------------
+INDUSTRY_SEED_MAP = {
+    # Canonical label : seeds
+    "Real Estate": {
+        "aliases": ["realtor", "real estate agent", "realty", "broker"],
+        "seed_keywords": ["real estate", "homes for sale", "mortgage rates", "open houses", "school districts"],
+        "feeder_categories": ["apartment complex", "moving company", "mortgage broker", "home builder", "property management"],
+        "subreddits": ["RealEstate", "HomeImprovement", "personalfinance", "FirstTimeHomeBuyer", "RealEstateTechnology"]
+    },
+    "Fitness": {
+        "aliases": ["gym", "personal training", "crossfit"],
+        "seed_keywords": ["gym near me", "personal trainer", "weight loss", "HIIT", "nutrition coaching"],
+        "feeder_categories": ["physical therapy", "chiropractor", "sports clubs", "supplement store", "healthy cafe"],
+        "subreddits": ["fitness", "loseit", "nutrition", "bodyweightfitness", "xxfitness"]
+    },
+    "SaaS": {
+        "aliases": ["software", "b2b saas", "startup"],
+        "seed_keywords": ["b2b software", "crm tools", "marketing automation", "customer success", "data analytics"],
+        "feeder_categories": ["digital agency", "implementation partner", "system integrator", "coworking space", "accelerator"],
+        "subreddits": ["SaaS", "Entrepreneur", "startup", "growthhacking", "UserExperience"]
+    },
+    "E-commerce": {
+        "aliases": ["eccom", "online store", "shopify"],
+        "seed_keywords": ["shopify apps", "conversion rate", "product reviews", "influencer marketing", "dropshipping"],
+        "feeder_categories": ["photo studio", "fulfillment center", "last-mile delivery", "returns service", "influencer agency"],
+        "subreddits": ["ecommerce", "shopify", "Entrepreneur", "PPC", "SEO"]
+    },
+    "Local Services": {
+        "aliases": ["plumber", "electrician", "roofing", "contractor"],
+        "seed_keywords": ["local marketing", "near me searches", "google reviews", "home services", "lead generation"],
+        "feeder_categories": ["property management", "real estate office", "insurance agency", "home warranty", "hardware store"],
+        "subreddits": ["smallbusiness", "marketing", "SEO", "PPC", "AskMarketing"]
+    },
+    "Custom": {
+        "aliases": [],
+        "seed_keywords": [],
+        "feeder_categories": [],
+        "subreddits": []
+    }
+}
+
+def _normalize_industry_label(label: str) -> str:
+    if not label:
+        return "Custom"
+    s = label.strip().lower()
+    for canon, cfg in INDUSTRY_SEED_MAP.items():
+        if s == canon.lower():
+            return canon
+        for alias in cfg.get("aliases", []):
+            if s == alias.lower():
+                return canon
+    return "Custom"
+
+def _apply_industry_to_state(canon_label: str):
+    """Sync session state from the industry seed map and reset caches."""
+    cfg = INDUSTRY_SEED_MAP.get(canon_label, INDUSTRY_SEED_MAP["Custom"])
+    # Sync keywords
+    kw = cfg.get("seed_keywords", [])
+    st.session_state["niche_keywords_list"] = list(kw)
+    st.session_state["trend_niche"] = ", ".join(kw)
+    # Sync feeder categories
+    fc = cfg.get("feeder_categories", [])
+    st.session_state["feeder_cats_list"] = list(fc)
+    st.session_state["lead_cat"] = ", ".join(fc) if fc else st.session_state.get("lead_cat", "")
+    # Sync subreddits
+    sr = cfg.get("subreddits", [])
+    st.session_state["subreddits_list"] = list(sr)
+    st.session_state["trend_subs"] = ", ".join(sr)
+    # Reset caches so UI reflects the new industry immediately
+    st.session_state["trend_data_cache"] = None
+    st.session_state["lead_data_cache"] = None
+
 
 st.title("🌊 Wave — AI Growth Team (Pro)")
 st.caption("Trends → Leads → Outreach (+ LangChain, LangGraph, CrewAI).")
@@ -494,6 +611,17 @@ with tab1:
             "- **YouTube** fresh videos for zeitgeist\n"
             "- An **AI market summary** and post ideas\n"
         )
+
+    # (NEW) Industry selector — keeps suggestions in sync
+    industry_options = list(INDUSTRY_SEED_MAP.keys())
+    # Prefer showing Custom at end for UX
+    industry_options = [x for x in industry_options if x != "Custom"] + ["Custom"]
+    prev_ind = st.session_state.get("industry_selected", "Custom")
+    ind = st.selectbox("Industry", options=industry_options, index=industry_options.index(prev_ind))
+    if ind != prev_ind:
+        st.session_state["industry_selected"] = ind
+        _apply_industry_to_state(ind)
+        st.rerun()
 
     # 1) SUGGESTION BUTTONS + GLOSSY CHIPS (BEFORE the form)
     colA, colB, colC = st.columns(3)
@@ -635,9 +763,15 @@ with tab1:
         st.info("Enter your niche/city and click **Fetch trends**.")
     else:
         rising = pd.DataFrame(data.get("google_trends", {}).get("rising", []))
+        # (NEW) Defensive guard: ensure required columns exist with correct types
+        for col, default in (("keyword", ""), ("query", ""), ("value", 0), ("link", "")):
+            if col not in rising.columns:
+                rising[col] = default
+        rising = rising[["keyword", "query", "value", "link"]]
+
         st.markdown("### Google Trends — Rising Queries")
         if not rising.empty:
-            st.dataframe(rising[["keyword", "query", "value", "link"]], use_container_width=True)
+            st.dataframe(rising, use_container_width=True)
         else:
             st.info("No rising queries or pytrends missing.")
 
@@ -973,7 +1107,7 @@ with tab5:
             model = ChatOpenAI(model="gpt-4o-mini", temperature=0.2, api_key=OPENAI_API_KEY)
             def decide(state: S) -> S:
                 rising = trend_data.get("google_trends", {}).get("rising", [])
-                hot = len([r for r in rising if r.get("value", 0) >= 100]) >= 3
+                hot = len([r for r in rising if (r.get("value", 0) or 0) >= 100]) >= 3
                 state["intent"] = "content" if hot else "research"
                 return state
             def do_research(state: S) -> S:
@@ -1003,8 +1137,9 @@ with tab5:
 
     # CrewAI Growth Crew
     st.markdown("### CrewAI Growth Crew (ON)")
-    if not (CREW_OK and OPENAI_API_KEY):
-        st.warning("CrewAI not installed or OPENAI_API_KEY missing.")
+    # (FIX) Proper gating requires CrewAI + langchain_openai + OPENAI_API_KEY
+    if not (CREW_OK and LCO_OK and OPENAI_API_KEY):
+        st.warning("CrewAI not installed, langchain_openai missing, or OPENAI_API_KEY missing.")
     else:
         biz = st.text_input("Business", st.session_state.get("out_persona", "Real Estate Agent"), key="crew_biz")
         niche = st.text_input("Niche focus", "Relocation in Katy, TX", key="crew_niche")
